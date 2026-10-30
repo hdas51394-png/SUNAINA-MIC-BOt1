@@ -6,29 +6,45 @@ class LavalinkNodeManager {
     constructor(client) {
         this.client = client;
         this.riffy = null;
+
         this.initialized = false;
+        this.started = false;
         this.destroying = false;
+
+        this.connectionWaiters = new Set();
     }
 
+    // Validate and prepare Lavalink nodes
     initializeNodes() {
         if (!Array.isArray(config.nodes) || config.nodes.length === 0) {
-            throw new Error("No Lavalink nodes found in config.js");
+            throw new Error("No Lavalink nodes configured in config.js");
         }
 
         return config.nodes.map((node, index) => {
-            if (!node.host || !node.port || !node.password) {
-                throw new Error(`Invalid Lavalink node configuration at index ${index}`);
+            if (!node.host || !node.password || !node.port) {
+                throw new Error(
+                    `Invalid Lavalink node at config.nodes[${index}]. Check host, password and port.`
+                );
+            }
+
+            const port = Number(node.port);
+
+            if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                throw new Error(
+                    `Invalid port for Lavalink node at index ${index}`
+                );
             }
 
             return {
-                host: node.host,
-                password: node.password,
-                port: Number(node.port),
-                secure: Boolean(node.secure)
+                host: String(node.host).trim(),
+                password: String(node.password),
+                port,
+                secure: node.secure === true
             };
         });
     }
 
+    // Create Riffy instance
     async initializeRiffy() {
         if (this.destroying) {
             throw new Error("Lavalink manager is shutting down.");
@@ -71,38 +87,52 @@ class LavalinkNodeManager {
             `[LAVALINK] Riffy initialized with ${nodes.length} node(s).`
         );
 
+        nodes.forEach((node, index) => {
+            console.log(
+                `[LAVALINK] Node ${index + 1}: ${node.host}:${node.port} | SSL: ${node.secure}`
+            );
+        });
+
         return this.riffy;
     }
 
+    // Riffy node events
     setupEventListeners() {
         if (!this.riffy) return;
 
         this.riffy.on("nodeConnect", (node) => {
             console.log(
-                `[LAVALINK] Connected: ${node.name || "Unknown node"}`
+                `[LAVALINK] CONNECTED: ${node.name || node.host || "Unknown node"}`
             );
+
+            this.resolveConnectionWaiters();
         });
 
-        this.riffy.on("nodeDisconnect", (node) => {
+        this.riffy.on("nodeDisconnect", (node, reason) => {
             console.warn(
-                `[LAVALINK] Disconnected: ${node.name || "Unknown node"}`
-            );
-        });
-
-        this.riffy.on("nodeError", (node, error) => {
-            console.error(
-                `[LAVALINK] Node error (${node?.name || "Unknown"}):`,
-                error?.message || error
+                `[LAVALINK] DISCONNECTED: ${node?.name || node?.host || "Unknown node"}`,
+                reason || ""
             );
         });
 
         this.riffy.on("nodeReconnect", (node) => {
             console.log(
-                `[LAVALINK] Reconnecting: ${node?.name || "Unknown node"}`
+                `[LAVALINK] RECONNECTED: ${node?.name || node?.host || "Unknown node"}`
             );
+
+            this.resolveConnectionWaiters();
+        });
+
+        this.riffy.on("nodeError", (node, error) => {
+            console.error("[LAVALINK] NODE CONNECTION ERROR");
+            console.error("Node:", node?.name || "Unknown");
+            console.error("Host:", node?.host || "Unknown");
+            console.error("Port:", node?.port || "Unknown");
+            console.error("Error:", error?.stack || error?.message || error);
         });
     }
 
+    // Start actual Lavalink connection
     init(userId) {
         if (!this.riffy) {
             throw new Error("Riffy has not been initialized.");
@@ -112,36 +142,52 @@ class LavalinkNodeManager {
             throw new Error("Lavalink manager is shutting down.");
         }
 
-        if (this.initialized) {
+        if (this.started) {
+            console.log("[LAVALINK] Already initialized.");
+            return;
+        }
+
+        this.started = true;
+
+        try {
             this.riffy.init(userId);
-            console.log("[LAVALINK] Node initialization started.");
+
+            console.log(
+                `[LAVALINK] Connection started for Discord client: ${userId}`
+            );
+        } catch (error) {
+            this.started = false;
+            console.error("[LAVALINK] Init failed:", error);
+            throw error;
         }
     }
 
+    // Get connected node count
     getConnectedNodeCount() {
         if (!this.riffy?.nodes) return 0;
 
         const nodes = this.riffy.nodes;
 
+        let nodeList = [];
+
         if (nodes instanceof Map) {
-            return [...nodes.values()].filter(
-                node => node.connected || node.state === "CONNECTED"
-            ).length;
+            nodeList = [...nodes.values()];
+        } else if (Array.isArray(nodes)) {
+            nodeList = nodes;
+        } else {
+            nodeList = Object.values(nodes);
         }
 
-        if (Array.isArray(nodes)) {
-            return nodes.filter(
-                node => node.connected || node.state === "CONNECTED"
-            ).length;
-        }
-
-        return Object.values(nodes).filter(
-            node => node.connected || node.state === "CONNECTED"
-        ).length;
+        return nodeList.filter(node => {
+            return (
+                node?.connected === true ||
+                node?.state === "CONNECTED"
+            );
+        }).length;
     }
 
     getTotalNodeCount() {
-        return config.nodes?.length || 0;
+        return Array.isArray(config.nodes) ? config.nodes.length : 0;
     }
 
     getNodeCount() {
@@ -153,34 +199,105 @@ class LavalinkNodeManager {
     }
 
     getNodeStatus() {
-        const connected = this.getConnectedNodeCount();
+        const online = this.getConnectedNodeCount();
         const total = this.getTotalNodeCount();
 
         return {
             total,
-            online: connected,
-            offline: Math.max(0, total - connected)
+            online,
+            offline: Math.max(0, total - online)
         };
     }
 
+    // Resolve pending connection checks
+    resolveConnectionWaiters() {
+        if (!this.hasConnectedNodes()) return;
+
+        for (const resolve of this.connectionWaiters) {
+            resolve(true);
+        }
+
+        this.connectionWaiters.clear();
+    }
+
+    // Wait for a node to connect
+    async waitForConnectedNode(timeout = 15000) {
+        if (this.hasConnectedNodes()) return true;
+
+        if (!this.riffy || this.destroying || !this.started) {
+            return false;
+        }
+
+        return new Promise(resolve => {
+            let settled = false;
+
+            const finish = (result) => {
+                if (settled) return;
+
+                settled = true;
+
+                clearTimeout(timer);
+                this.connectionWaiters.delete(finish);
+
+                resolve(result);
+            };
+
+            const timer = setTimeout(() => {
+                finish(this.hasConnectedNodes());
+            }, timeout);
+
+            this.connectionWaiters.add(finish);
+
+            // Check again in case connection happened during registration.
+            if (this.hasConnectedNodes()) {
+                finish(true);
+            }
+        });
+    }
+
+    // Check before playing music
     async ensureNodeAvailable() {
         if (this.destroying) {
             throw new Error("Lavalink manager is shutting down.");
+        }
+
+        if (!this.riffy || !this.started) {
+            throw new Error(
+                "Lavalink is not initialized. Check your Discord ready event."
+            );
         }
 
         if (this.hasConnectedNodes()) {
             return true;
         }
 
+        console.log(
+            "[LAVALINK] Waiting for a Lavalink node connection..."
+        );
+
+        const connected = await this.waitForConnectedNode(15000);
+
+        if (connected) {
+            console.log("[LAVALINK] Node is ready.");
+            return true;
+        }
+
         throw new Error(
-            "No Lavalink nodes are connected. Check your Lavalink server and configuration."
+            "No Lavalink nodes connected after 15 seconds. Check Lavalink host, port, password, SSL and server status."
         );
     }
 
+    // Shutdown
     destroy() {
         if (this.destroying) return;
 
         this.destroying = true;
+
+        for (const resolve of this.connectionWaiters) {
+            resolve(false);
+        }
+
+        this.connectionWaiters.clear();
 
         try {
             if (this.riffy?.players?.values) {
@@ -198,7 +315,9 @@ class LavalinkNodeManager {
 
             this.riffy = null;
             this.client.riffy = null;
+
             this.initialized = false;
+            this.started = false;
 
             console.log("[LAVALINK] Cleanup completed.");
         } catch (error) {
@@ -207,8 +326,10 @@ class LavalinkNodeManager {
     }
 }
 
+// Singleton manager
 let nodeManagerInstance = null;
 
+// Initialize manager
 async function initializeLavalinkManager(client) {
     if (!nodeManagerInstance) {
         nodeManagerInstance = new LavalinkNodeManager(client);
@@ -221,10 +342,12 @@ async function initializeLavalinkManager(client) {
     return nodeManagerInstance;
 }
 
+// Compatibility function
 async function initializePlayer(client) {
     return initializeLavalinkManager(client);
 }
 
+// Get manager
 function getLavalinkManager() {
     return nodeManagerInstance;
 }
