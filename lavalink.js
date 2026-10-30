@@ -610,23 +610,59 @@ class LavalinkNodeManager {
         }
     }
 
-    destroy() {
+  
+destroy() {
+    try {
+        // Stop health check interval
         if (this.healthCheckInterval) {
             clearInterval(this.healthCheckInterval);
             this.healthCheckInterval = null;
         }
+
+        // Stop connection loop interval
         if (this.connectLoopInterval) {
             clearInterval(this.connectLoopInterval);
             this.connectLoopInterval = null;
         }
+
+        // Safely clean up Riffy players if supported
         if (this.riffy) {
-            this.riffy.destroy();
+            const players = this.riffy.players;
+
+            if (players && typeof players.values === 'function') {
+                for (const player of players.values()) {
+                    try {
+                        if (typeof player.destroy === 'function') {
+                            player.destroy();
+                        }
+                    } catch (error) {
+                        console.error(
+                            '[ LAVALINK ] Player cleanup error:',
+                            error.message
+                        );
+                    }
+                }
+            }
+
+            // Call manager cleanup only if actually available
+            if (typeof this.riffy.destroy === 'function') {
+                this.riffy.destroy();
+            }
+
             this.riffy = null;
         }
+
         this.initialized = false;
+
+        console.log('[ LAVALINK ] Cleanup completed successfully.');
+
+    } catch (error) {
+        console.error(
+            '[ LAVALINK ] Shutdown cleanup error:',
+            error
+        );
     }
 }
-
 
 
 let nodeManagerInstance = null;
