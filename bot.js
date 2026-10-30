@@ -15,9 +15,12 @@ const config = require("./config.js");
 const colors = require("./UI/colors/colors");
 const { connectToDatabase } = require("./mongodb");
 const {
+  
+const {
     initializePlayer,
     getLavalinkManager
 } = require("./lavalink.js");
+
 
 const { getLangSync } = require("./utils/languageLoader.js");
 
