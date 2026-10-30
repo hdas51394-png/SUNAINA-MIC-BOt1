@@ -1,8 +1,11 @@
 {
   "name": "prime-music",
-  "version": "1.4",
+  "version": "1.4.0",
   "description": "Advanced Lavalink Music Bot",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.83",
     "axios": "^1.8.1",
@@ -16,9 +19,6 @@
     "spotify-web-api-node": "^5.0.2",
     "yt-search": "^2.13.1"
   },
-  "scripts": {
-    "start": "node index.js"
-  },
   "author": "GlaceYT",
-  "license": "MIT License"
+  "license": "MIT"
 }
