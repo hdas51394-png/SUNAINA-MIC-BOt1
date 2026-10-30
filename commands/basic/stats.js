@@ -1,144 +1,218 @@
-const { SlashCommandBuilder, ContainerBuilder, MessageFlags } = require('discord.js');
+
+const {
+    SlashCommandBuilder,
+    ContainerBuilder,
+    MessageFlags
+} = require('discord.js');
+
 const os = require('os');
 const { getLang } = require('../../utils/languageLoader');
 const { getEmoji } = require('../../UI/emojis/emoji');
 const { safeDeferReply } = require('../../utils/responseHandler');
 
 const data = new SlashCommandBuilder()
-  .setName("stats")
-  .setDescription("Show bot statistics and server information");
+    .setName('stats')
+    .setDescription('Show bot statistics and server information');
 
-function formatUptime(ms) {
-    const seconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
+function formatUptime(ms = 0) {
+    const seconds = Math.floor((ms || 0) / 1000);
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = seconds % 60;
 
-    if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
-    if (hours > 0) return `${hours}h ${minutes % 60}m`;
-    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-    return `${seconds}s`;
+    if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+
+    return `${remainingSeconds}s`;
 }
 
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+function formatBytes(bytes = 0) {
+    if (!bytes || bytes <= 0) return '0 Bytes';
+
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(
+        Math.floor(Math.log(bytes) / Math.log(1024)),
+        sizes.length - 1
+    );
+
+    return `${(bytes / Math.pow(1024, index)).toFixed(2)} ${sizes[index]}`;
 }
 
-function buildPaleCard(title, sections) {
+function emoji(name) {
+    try {
+        return getEmoji(name) || '';
+    } catch {
+        return '';
+    }
+}
+
+function translate(value, fallback, replacements = {}) {
+    let result = typeof value === 'string' ? value : fallback;
+
+    for (const [key, replacement] of Object.entries(replacements)) {
+        result = result.replaceAll(`{${key}}`, String(replacement));
+    }
+
+    return result;
+}
+
+function buildStatsCard(sections) {
     const container = new ContainerBuilder()
-        .addTextDisplayComponents((textDisplay) => textDisplay.setContent(`## ${title}`));
+        .addTextDisplayComponents(text =>
+            text.setContent('## 📊 Bot Statistics')
+        );
 
     for (const section of sections) {
         container
-            .addSeparatorComponents((separator) => separator)
-            .addTextDisplayComponents((textDisplay) => textDisplay.setContent(section));
+            .addSeparatorComponents(separator => separator)
+            .addTextDisplayComponents(text =>
+                text.setContent(section)
+            );
     }
 
     return container;
 }
 
 module.exports = {
-    data: data,
+    data,
+
     run: async (client, interaction) => {
         try {
-            const lang = await getLang(interaction.guildId);
-            const t = lang.stats;
-            
+            // Defer immediately to prevent interaction timeout.
             const deferred = await safeDeferReply(interaction);
-            if (!deferred && !interaction.deferred && !interaction.replied) return;
 
-            const player = client.riffy.players.get(interaction.guildId);
-            const activePlayers = Array.from(client.riffy.players.values()).filter(p => p.playing || p.paused);
-            const totalPlayers = client.riffy.players.size;
-            
+            if (
+                !deferred &&
+                !interaction.deferred &&
+                !interaction.replied
+            ) {
+                return;
+            }
+
+            const lang = await getLang(interaction.guildId).catch(() => ({}));
+            const t = lang?.stats || {};
+
+            // Lavalink / Riffy protection
+            const players = client.riffy?.players;
+
+            const playerMap =
+                players && typeof players.values === 'function'
+                    ? Array.from(players.values())
+                    : [];
+
+            const activePlayers = playerMap.filter(
+                player => player.playing || player.paused
+            );
+
+            const totalPlayers = playerMap.length;
+            const player = players?.get?.(interaction.guildId);
+
+            // Memory information
             const memoryUsage = process.memoryUsage();
             const totalMemory = os.totalmem();
             const freeMemory = os.freemem();
             const usedMemory = totalMemory - freeMemory;
 
-            const currentTrack = player?.current 
-                ? (player.current.info.title.length > 40 
-                    ? player.current.info.title.substring(0, 40) + '...' 
-                    : player.current.info.title)
-                : 'None';
+            // Track information
+            const trackTitle =
+                player?.current?.info?.title ||
+                player?.queue?.current?.info?.title ||
+                'None';
+
+            const currentTrack =
+                trackTitle.length > 40
+                    ? trackTitle.substring(0, 40) + '...'
+                    : trackTitle;
+
+            // System information
+            const cpu = os.cpus()?.[0]?.model || 'Unknown';
+            const cpuName = cpu.length > 40
+                ? cpu.substring(0, 40) + '...'
+                : cpu;
 
             const sections = [
                 [
-                    t.header.title,
-                    t.header.botName.replace('{botName}', client.user.username)
+                    '### 🤖 Bot Information',
+                    `**Name:** ${client.user?.username || 'Unknown'}`,
+                    `**ID:** ${client.user?.id || 'Unknown'}`,
+                    `**Ping:** ${client.ws?.ping ?? 'N/A'} ms`,
+                    `**Uptime:** ${formatUptime(client.uptime)}`
                 ].join('\n'),
+
                 [
-                    t.botInfo.title,
-                    `${getEmoji('servers')} ${t.botInfo.servers.replace('{count}', client.guilds.cache.size.toLocaleString())}`,
-                    `${getEmoji('users')} ${t.botInfo.users.replace('{count}', client.users.cache.size.toLocaleString())}`,
-                    `${getEmoji('folder')} ${t.botInfo.channels.replace('{count}', client.channels.cache.size.toLocaleString())}`,
-                    `${getEmoji('uptime')} ${t.botInfo.uptime.replace('{uptime}', formatUptime(client.uptime))}`,
-                    `${getEmoji('ping')} ${t.memory.ping.replace('{ping}', client.ws.ping)}`
+                    `### ${emoji('servers')} Server Statistics`,
+                    `**Servers:** ${client.guilds.cache.size.toLocaleString()}`,
+                    `**Users (cached):** ${client.users.cache.size.toLocaleString()}`,
+                    `**Channels (cached):** ${client.channels.cache.size.toLocaleString()}`,
+                    `**Commands:** ${client.commands?.size || 0}`
                 ].join('\n'),
+
                 [
-                    t.musicStats.title,
-                    `${getEmoji('music')} ${t.musicStats.activePlayers.replace('{count}', activePlayers.length)}`,
-                    `${getEmoji('queue')} ${t.musicStats.totalPlayers.replace('{count}', totalPlayers)}`,
-                    `${getEmoji('play')} ${t.musicStats.currentTrack.replace('{track}', currentTrack)}`
+                    `### ${emoji('music')} Music Statistics`,
+                    `**Active Players:** ${activePlayers.length}`,
+                    `**Total Players:** ${totalPlayers}`,
+                    `**Current Track:** ${currentTrack}`
                 ].join('\n'),
+
                 [
-                    t.systemInfo.title,
-                    `${getEmoji('tools')} ${t.systemInfo.cpu.replace('{cpu}', os.cpus()[0].model.substring(0, 35) + '...')}`,
-                    `${getEmoji('servers')} ${t.systemInfo.platform.replace('{platform}', os.platform())}`,
-                    `${getEmoji('settings')} ${t.systemInfo.nodejs.replace('{version}', process.version)}`,
-                    `${getEmoji('commands')} ${t.systemInfo.discordjs.replace('{version}', require('discord.js').version)}`,
-                    ''
+                    `### ${emoji('tools')} System Information`,
+                    `**CPU:** ${cpuName}`,
+                    `**Platform:** ${os.platform()}`,
+                    `**Architecture:** ${os.arch()}`,
+                    `**Node.js:** ${process.version}`,
+                    `**Discord.js:** ${require('discord.js').version}`
                 ].join('\n'),
+
                 [
-                    t.memory.title,
-                    `${t.memory.used.replace('{used}', formatBytes(memoryUsage.heapUsed))} • ${t.memory.total.replace('{total}', formatBytes(memoryUsage.heapTotal))}`,
-                    `${t.memory.systemUsed.replace('{used}', formatBytes(usedMemory))} • ${t.memory.systemFree.replace('{free}', formatBytes(freeMemory))}`,
-                    `${t.memory.shards.replace('{count}', client.shard?.count || 1)} • ${t.memory.commands.replace('{count}', client.commands.size)}`
+                    `### ${emoji('settings')} Memory Information`,
+                    `**Heap Used:** ${formatBytes(memoryUsage.heapUsed)}`,
+                    `**Heap Total:** ${formatBytes(memoryUsage.heapTotal)}`,
+                    `**System Used:** ${formatBytes(usedMemory)}`,
+                    `**System Free:** ${formatBytes(freeMemory)}`,
+                    `**Shards:** ${client.shard?.count || 1}`
                 ].join('\n')
             ];
 
-            const card = buildPaleCard(`${getEmoji('commands')} Stats`, sections);
+            const card = buildStatsCard(sections);
 
-            return interaction.editReply({
+            return await interaction.editReply({
                 components: [card],
-                flags: MessageFlags.IsComponentsV2,
+                flags: MessageFlags.IsComponentsV2
             });
 
         } catch (error) {
-            console.error('Error processing stats command:', error);
-            
-            const lang = await getLang(interaction.guildId).catch(() => ({ stats: { errors: {} } }));
-            const t = lang.stats?.errors || {};
-            
-            const errorCard = buildPaleCard(
-                `${getEmoji('error')} Error`,
-                [
-                    (t.title || '## ❌ Error') + '\n\n' +
-                    (t.message || 'An error occurred while retrieving statistics.\nPlease try again later.')
-                ]
-            );
+            console.error('[ STATS COMMAND ERROR ]', error);
+
+            const errorMessage =
+                '❌ Unable to retrieve bot statistics. Please try again later.';
 
             try {
-                if (interaction.deferred || interaction.replied) {
-                    return interaction.editReply({
-                        components: [errorCard],
-                        flags: MessageFlags.IsComponentsV2,
-                    });
-                } else {
-                    return interaction.reply({
-                        components: [errorCard],
-                        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+                if (interaction.deferred) {
+                    return await interaction.editReply({
+                        content: errorMessage,
+                        components: []
                     });
                 }
-            } catch (e) {
-                return interaction.followUp({
-                    content: t.fallback || "❌ An error occurred while retrieving statistics.",
-                    flags: MessageFlags.Ephemeral,
-                }).catch(() => {});
+
+                if (interaction.replied) {
+                    return await interaction.followUp({
+                        content: errorMessage,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                return await interaction.reply({
+                    content: errorMessage,
+                    flags: MessageFlags.Ephemeral
+                });
+
+            } catch (replyError) {
+                console.error(
+                    '[ STATS RESPONSE ERROR ]',
+                    replyError
+                );
             }
         }
     }
