@@ -1,13 +1,15 @@
+
 const { Riffy } = require("riffy");
 const config = require("./config.js");
-const colors = require('./UI/colors/colors');
-const axios = require('axios');
+const colors = require("./UI/colors/colors");
+const axios = require("axios");
 
 let getLangSync;
+
 try {
-    const langLoader = require('./utils/languageLoader.js');
+    const langLoader = require("./utils/languageLoader.js");
     getLangSync = langLoader.getLangSync;
-} catch (e) {
+} catch (error) {
     getLangSync = () => ({ console: {} });
 }
 
@@ -16,34 +18,42 @@ class LavalinkNodeManager {
         this.client = client;
         this.nodes = new Map();
         this.nodeStatus = new Map();
+
         this.healthCheckInterval = null;
         this.connectLoopInterval = null;
+        this.reconnectInterval = null;
+
         this.riffy = null;
         this.initialized = false;
+        this.destroying = false;
+
         this.connectionPromise = null;
         this.connectionResolve = null;
-        
+
         this.initializeNodes();
     }
 
     initializeNodes() {
-        if (config.nodes && Array.isArray(config.nodes) && config.nodes.length > 0) {
+        if (Array.isArray(config.nodes)) {
             const nameCounts = new Map();
-            
+
             config.nodes.forEach((node, index) => {
                 const baseName = node.name || `node-${index}`;
                 const count = nameCounts.get(baseName) || 0;
+
                 nameCounts.set(baseName, count + 1);
-                
-                const nodeId = count > 0 ? `${baseName}-${count}` : baseName;
-                const displayName = count > 0 ? `${baseName}-${count}` : baseName;
-                
+
+                const nodeId = count > 0
+                    ? `${baseName}-${count}`
+                    : baseName;
+
                 this.nodes.set(nodeId, {
                     ...node,
                     id: nodeId,
-                    displayName: displayName,
+                    displayName: nodeId,
                     originalName: baseName
                 });
+
                 this.nodeStatus.set(nodeId, {
                     online: false,
                     lastCheck: null,
@@ -53,359 +63,479 @@ class LavalinkNodeManager {
         }
 
         const lang = getLangSync();
-        console.log(`${colors.cyan}[ LAVALINK ][INIT ]${colors.reset} ${lang.console?.lavalink?.nodesConfigured?.replace('{count}', this.nodes.size) || `Nodes configured: ${this.nodes.size}`}`);
+
+        console.log(
+            `${colors.cyan}[ LAVALINK ][INIT ]${colors.reset} ${
+                lang.console?.lavalink?.nodesConfigured
+                    ?.replace("{count}", this.nodes.size)
+                || `Nodes configured: ${this.nodes.size}`
+            }`
+        );
     }
 
     async initializeRiffy() {
+        if (this.destroying) {
+            throw new Error("Lavalink manager is shutting down.");
+        }
+
         try {
-            const nodesToUse = Array.from(this.nodes.values()).map((node) => ({
+            const nodesToUse = Array.from(this.nodes.values()).map(node => ({
                 host: node.host,
                 password: node.password,
                 port: node.port,
                 secure: !!node.secure,
                 name: node.id,
-                displayName: node.displayName || node.name || node.id
+                displayName: node.displayName
             }));
 
-            this.riffy = new Riffy(this.client, nodesToUse, {
-                send: (payload) => {
-                    const guild = this.client.guilds.cache.get(payload.d.guild_id);
-                    if (guild) guild.shard.send(payload);
-                },
-                defaultSearchPlatform: "ytsearch",
-                restVersion: "v4",
-                autoResume: true,
-                resumeKey: "PrimeMusic",
-                resumeTimeout: 30000,
-            });
+            this.riffy = new Riffy(
+                this.client,
+                nodesToUse,
+                {
+                    send: (payload) => {
+                        const guild = this.client.guilds.cache.get(
+                            payload.d.guild_id
+                        );
+
+                        if (guild) {
+                            guild.shard.send(payload);
+                        }
+                    },
+
+                    defaultSearchPlatform: "ytsearch",
+                    restVersion: "v4",
+                    autoResume: true,
+                    resumeKey: "PrimeMusic",
+                    resumeTimeout: 30000
+                }
+            );
 
             this.setupEventListeners();
-            this.startHealthMonitoring();
-            this.startConnectLoop(); 
+
             this.initialized = true;
 
-            const lang = getLangSync();
-            console.log(`${colors.cyan}[ LAVALINK ][Riffy]${colors.reset} ${colors.green}${lang.console?.lavalink?.riffyInitialized?.replace('{count}', nodesToUse.length) || `Initialized with ${nodesToUse.length} node(s)`}${colors.reset}`);
+            this.startHealthMonitoring();
+            this.startConnectLoop();
 
-         
+            const lang = getLangSync();
+
+            console.log(
+                `${colors.cyan}[ LAVALINK ][Riffy]${colors.reset} ${
+                    colors.green
+                }${
+                    lang.console?.lavalink?.riffyInitialized
+                        ?.replace("{count}", nodesToUse.length)
+                    || `Initialized with ${nodesToUse.length} node(s)`
+                }${colors.reset}`
+            );
+
             setTimeout(() => {
+                if (!this.riffy) return;
+
                 try {
                     let keys = [];
-                    if (this.riffy?.nodes instanceof Map) {
+
+                    if (this.riffy.nodes instanceof Map) {
                         keys = [...this.riffy.nodes.keys()];
-                    } else if (Array.isArray(this.riffy?.nodes)) {
-                        keys = this.riffy.nodes.map(n => n?.name || n?.identifier);
-                    } else if (this.riffy?.nodes && typeof this.riffy.nodes === 'object') {
+                    } else if (Array.isArray(this.riffy.nodes)) {
+                        keys = this.riffy.nodes.map(
+                            node => node?.name || node?.identifier
+                        );
+                    } else if (this.riffy.nodes) {
                         keys = Object.keys(this.riffy.nodes);
                     }
-                    const lang = getLangSync();
-                    console.log(`${colors.cyan}[ LAVALINK ][Riffy]${colors.reset} ${lang.console?.lavalink?.nodeKeys || 'Node keys:'}`, keys);
-                } catch (_) {}
+
+                    console.log(
+                        `${colors.cyan}[ LAVALINK ][Riffy]${colors.reset} Node keys:`,
+                        keys
+                    );
+                } catch (error) {
+                    console.error("[LAVALINK] Node inspection error:", error.message);
+                }
             }, 2000);
 
             return this.riffy;
+
         } catch (error) {
             const lang = getLangSync();
-            console.error(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.red}${lang.console?.lavalink?.failedToInitialize?.replace('{message}', error.message) || `Failed to initialize Riffy: ${error.message}`}${colors.reset}`);
+
+            console.error(
+                `${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.red}${
+                    lang.console?.lavalink?.failedToInitialize
+                        ?.replace("{message}", error.message)
+                    || `Failed to initialize Riffy: ${error.message}`
+                }${colors.reset}`
+            );
+
             throw error;
         }
     }
 
     _findRiffyNodeObjectByConfig(nodeConfig) {
-        if (!this.riffy || !this.riffy.nodes) return null;
+        if (!this.riffy?.nodes) return null;
 
-        const tryMatch = (riffyNode, cfg) => {
+        const tryMatch = (riffyNode) => {
             if (!riffyNode) return false;
+
             if (riffyNode.host && riffyNode.port) {
-                return riffyNode.host === cfg.host && String(riffyNode.port) === String(cfg.port);
+                return (
+                    riffyNode.host === nodeConfig.host &&
+                    String(riffyNode.port) === String(nodeConfig.port)
+                );
             }
-            if (riffyNode.identifier) {
-                return riffyNode.identifier === cfg.id || riffyNode.identifier === cfg.displayName;
-            }
-            if (riffyNode.name) {
-                return riffyNode.name === cfg.id || riffyNode.name === cfg.displayName || riffyNode.name === cfg.name;
-            }
-            return false;
+
+            const identifier =
+                riffyNode.identifier ||
+                riffyNode.name;
+
+            return (
+                identifier === nodeConfig.id ||
+                identifier === nodeConfig.displayName
+            );
         };
 
         try {
-            if (this.riffy.nodes instanceof Map) {
-                for (const [, rnode] of this.riffy.nodes.entries()) {
-                    if (tryMatch(rnode, nodeConfig)) return rnode;
+            const nodes = this.riffy.nodes;
+
+            if (nodes instanceof Map) {
+                for (const node of nodes.values()) {
+                    if (tryMatch(node)) return node;
                 }
-            } else if (Array.isArray(this.riffy.nodes)) {
-                for (const rnode of this.riffy.nodes) {
-                    if (tryMatch(rnode, nodeConfig)) return rnode;
+            } else if (Array.isArray(nodes)) {
+                for (const node of nodes) {
+                    if (tryMatch(node)) return node;
                 }
-            } else if (typeof this.riffy.nodes === 'object') {
-                for (const key in this.riffy.nodes) {
-                    const rnode = this.riffy.nodes[key];
-                    if (tryMatch(rnode, nodeConfig)) return rnode;
+            } else {
+                for (const key of Object.keys(nodes)) {
+                    if (tryMatch(nodes[key])) return nodes[key];
                 }
             }
-        } catch (_) {}
+        } catch (error) {
+            console.error("[LAVALINK] Node lookup error:", error.message);
+        }
+
         return null;
     }
 
     async attemptConnectNode(nodeId) {
+        if (this.destroying || !this.riffy) return false;
+
         const nodeCfg = this.nodes.get(nodeId);
         if (!nodeCfg) return false;
 
         const healthy = await this.checkNodeHealth(nodeId).catch(() => false);
+
         if (!healthy) return false;
 
         const riffyNode = this._findRiffyNodeObjectByConfig(nodeCfg);
+
         if (riffyNode) {
-            if (typeof riffyNode.connect === 'function' && !riffyNode.connected) {
-                try { riffyNode.connect(); return true; } catch (_) {}
-            }
-            if (typeof riffyNode.connectNode === 'function' && !riffyNode.connected) {
-                try { riffyNode.connectNode(); return true; } catch (_) {}
+            try {
+                if (
+                    typeof riffyNode.connect === "function" &&
+                    !riffyNode.connected
+                ) {
+                    riffyNode.connect();
+                    return true;
+                }
+
+                if (
+                    typeof riffyNode.connectNode === "function" &&
+                    !riffyNode.connected
+                ) {
+                    riffyNode.connectNode();
+                    return true;
+                }
+            } catch (error) {
+                console.error("[LAVALINK] Connect error:", error.message);
             }
         }
 
-  
-        try {
-            await this.refreshRiffy();
-            return true;
-        } catch (_) {
-            return false;
-        }
+        return false;
     }
 
-  
     async forceConnectAllNodes() {
-        if (!this.riffy) return false;
-        let attempted = false;
-        const tries = [];
-        for (const nodeId of this.nodes.keys()) {
-            tries.push(
+        if (!this.riffy || this.destroying) return false;
+
+        const results = await Promise.allSettled(
+            Array.from(this.nodes.keys()).map(nodeId =>
                 this.attemptConnectNode(nodeId)
-                    .then(res => { if (res) attempted = true; return res; })
-                    .catch(() => false)
-            );
-        }
-        await Promise.allSettled(tries);
-        return attempted;
+            )
+        );
+
+        return results.some(
+            result => result.status === "fulfilled" && result.value
+        );
     }
 
     async checkNodeHealth(nodeId) {
         const node = this.nodes.get(nodeId);
+
         if (!node) return false;
 
         try {
-            const protocol = node.secure ? 'https' : 'http';
-            const url = `${protocol}://${node.host}:${node.port}/version`;
+            const protocol = node.secure ? "https" : "http";
+
+            const url =
+                `${protocol}://${node.host}:${node.port}/version`;
+
             await axios.get(url, {
-                headers: node.password ? { Authorization: node.password } : {},
+                headers: node.password
+                    ? { Authorization: node.password }
+                    : {},
                 timeout: 3000
             });
-            this.nodeStatus.set(nodeId, { online: true, lastCheck: new Date(), lastError: null });
+
+            this.nodeStatus.set(nodeId, {
+                online: true,
+                lastCheck: new Date(),
+                lastError: null
+            });
+
             return true;
+
         } catch (error) {
-            this.nodeStatus.set(nodeId, { online: false, lastCheck: new Date(), lastError: error.message });
+            this.nodeStatus.set(nodeId, {
+                online: false,
+                lastCheck: new Date(),
+                lastError: error.message
+            });
+
             return false;
         }
     }
 
     async checkAllNodesHealth() {
         const healthy = [];
-        const checks = [];
-        for (const nodeId of this.nodes.keys()) {
-            checks.push(this.checkNodeHealth(nodeId).then(ok => { if (ok) healthy.push(nodeId); }).catch(() => {}));
-        }
-        await Promise.allSettled(checks);
+
+        await Promise.allSettled(
+            Array.from(this.nodes.keys()).map(async nodeId => {
+                const result = await this.checkNodeHealth(nodeId);
+
+                if (result) healthy.push(nodeId);
+            })
+        );
+
         return healthy;
     }
 
     startConnectLoop() {
-        if (this.connectLoopInterval) return;
+        if (this.connectLoopInterval || this.destroying) return;
+
         this.connectLoopInterval = setInterval(async () => {
+            if (this.destroying) return;
+
             try {
                 if (this.hasConnectedNodes()) return;
+
                 await this.reconnectNodesNow(5000);
-            } catch (_) {
-            
+            } catch (error) {
+                console.error("[LAVALINK] Reconnect loop error:", error.message);
             }
-        }, 10000); 
+        }, 10000);
     }
 
     async reconnectNodesNow(maxWaitTime = 8000) {
+        if (this.destroying || !this.riffy) return false;
+
         await this.checkAllNodesHealth().catch(() => {});
-        const attempted = await this.forceConnectAllNodes();
+
+        await this.forceConnectAllNodes();
 
         const start = Date.now();
-        while (Date.now() - start < maxWaitTime) {
+
+        while (
+            Date.now() - start < maxWaitTime &&
+            !this.destroying
+        ) {
             if (this.hasConnectedNodes()) return true;
-       
-            const eventConnected = await Promise.race([
-                this.waitForNodeConnectEvent(800),
-                new Promise(res => setTimeout(() => res(false), 800))
-            ]);
-            if (eventConnected && this.hasConnectedNodes()) return true;
-            await new Promise(res => setTimeout(res, 400));
+
+            await new Promise(resolve => setTimeout(resolve, 800));
         }
-        return attempted && this.hasConnectedNodes();
+
+        return this.hasConnectedNodes();
     }
 
     async refreshRiffy() {
+        if (this.destroying) return false;
+
         try {
-            if (this.hasConnectedNodes()) {
-     
-                return true;
-            }
-            if (this.riffy && typeof this.riffy.destroy === 'function') {
-                this.riffy.destroy();
-            }
+            if (this.hasConnectedNodes()) return true;
+
+            console.log("[LAVALINK] Refreshing Riffy...");
+
+            const oldRiffy = this.riffy;
+
             this.riffy = null;
+            this.initialized = false;
+
+            // Do not call an unsupported Riffy destroy method.
+            // Close only the players if their API supports it.
+            if (oldRiffy?.players?.values) {
+                for (const player of oldRiffy.players.values()) {
+                    try {
+                        if (typeof player.destroy === "function") {
+                            player.destroy();
+                        }
+                    } catch (_) {}
+                }
+            }
+
             await this.initializeRiffy();
-            const lang = getLangSync();
-            console.log(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.green}${lang.console?.lavalink?.riffyReinitialized || 'Riffy re-initialized'}${colors.reset}`);
+
+            console.log("[LAVALINK] Riffy re-initialized.");
+
             return true;
+
         } catch (error) {
-            const lang = getLangSync();
-            console.error(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.red}${lang.console?.lavalink?.failedToReinitialize?.replace('{message}', error.message) || `Failed to re-initialize Riffy: ${error.message}`}${colors.reset}`);
+            console.error(
+                "[LAVALINK] Failed to refresh Riffy:",
+                error.message
+            );
+
             return false;
         }
     }
 
     setupEventListeners() {
-        this.riffy.on('nodeConnect', (node) => {
+        if (!this.riffy) return;
+
+        this.riffy.on("nodeConnect", node => {
             const nodeId = this.findNodeIdByName(node.name);
-            if (nodeId) {
-                this.nodeStatus.set(nodeId, {
-                    online: true,
-                    lastCheck: new Date(),
-                    lastError: null
-                });
-                const availableCount = this.getConnectedNodeCount();
-                const totalCount = this.getTotalNodeCount();
-                const lang = getLangSync();
-                console.log(`${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${colors.green}${lang.console?.lavalink?.nodeConnected?.replace('{name}', node.name).replace('{host}', node.host).replace('{port}', node.port).replace('{available}', availableCount).replace('{total}', totalCount) || `Connected: ${node.name} (${node.host}:${node.port}) • ${availableCount}/${totalCount} up`}${colors.reset}`);
-                
-                if (this.connectionResolve) {
-                    this.connectionResolve(true);
-                    this.connectionResolve = null;
-                    this.connectionPromise = null;
-                }
+
+            if (!nodeId) return;
+
+            this.nodeStatus.set(nodeId, {
+                online: true,
+                lastCheck: new Date(),
+                lastError: null
+            });
+
+            console.log(
+                `${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${
+                    colors.green
+                }Connected: ${node.name} (${node.host}:${node.port})${
+                    colors.reset
+                }`
+            );
+
+            if (this.connectionResolve) {
+                this.connectionResolve(true);
+                this.connectionResolve = null;
+                this.connectionPromise = null;
             }
         });
 
-        this.riffy.on('nodeDisconnect', (node) => {
+        this.riffy.on("nodeDisconnect", node => {
             const nodeId = this.findNodeIdByName(node.name);
-            if (nodeId) {
-                const status = this.nodeStatus.get(nodeId) || {};
-                this.nodeStatus.set(nodeId, {
-                    ...status,
-                    online: false,
-                    lastCheck: new Date(),
-                    lastError: 'Disconnected'
-                });
-                const availableCount = this.getConnectedNodeCount();
-                const totalCount = this.getTotalNodeCount();
-                const lang = getLangSync();
-                console.log(`${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${colors.red}${lang.console?.lavalink?.nodeDisconnected?.replace('{name}', node.name).replace('{host}', node.host).replace('{port}', node.port).replace('{available}', availableCount).replace('{total}', totalCount) || `Disconnected: ${node.name} (${node.host}:${node.port}) • ${availableCount}/${totalCount} up`}${colors.reset}`);
-            }
+
+            if (!nodeId) return;
+
+            this.nodeStatus.set(nodeId, {
+                online: false,
+                lastCheck: new Date(),
+                lastError: "Disconnected"
+            });
+
+            console.log(
+                `${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${
+                    colors.red
+                }Disconnected: ${node.name}${colors.reset}`
+            );
         });
 
-        this.riffy.on('nodeError', (node, error) => {
+        this.riffy.on("nodeError", (node, error) => {
             const nodeId = this.findNodeIdByName(node.name);
-            if (nodeId) {
-                const status = this.nodeStatus.get(nodeId) || {};
-                const msg = error?.message || '';
-                
-         
-                if (msg.includes('player.restart is not a function') || msg.includes('restart is not a function')) {
-                    const lang = getLangSync();
-                    console.warn(`${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${colors.yellow}Ignoring Riffy reconnect bug for ${node.name} - node will reconnect automatically${colors.reset}`);
-                    return; 
-                }
-                
-                this.nodeStatus.set(nodeId, {
-                    ...status,
-                    online: false,
-                    lastCheck: new Date(),
-                    lastError: error.message
-                });
-                const availableCount = this.getConnectedNodeCount();
-                const totalCount = this.getTotalNodeCount();
-                
-                if (msg.includes('after 3 attempts')) {
-                    const lang = getLangSync();
-                    console.warn(`${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${colors.yellow}${lang.console?.lavalink?.retryLimitReported?.replace('{name}', node.name) || `Retry limit reported by ${node.name}; reconnect loop continues`}${colors.reset}`);
-                    this.reconnectNodesNow(3000).catch(() => {});
-                } else {
-                    const lang = getLangSync();
-                    console.error(`${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${colors.red}${lang.console?.lavalink?.nodeError?.replace('{name}', node.name).replace('{host}', node.host).replace('{port}', node.port).replace('{message}', msg) || `Error: ${node.name} (${node.host}:${node.port}) • ${msg}`}${colors.reset}`);
-                    console.log(`${colors.cyan}[ LAVALINK ][STATUS]${colors.reset} ${colors.yellow}${lang.console?.lavalink?.nodeStatus?.replace('{available}', availableCount).replace('{total}', totalCount) || `${availableCount}/${totalCount} up`}${colors.reset}`);
-                }
+
+            if (!nodeId) return;
+
+            const message = error?.message || "Unknown error";
+
+            this.nodeStatus.set(nodeId, {
+                online: false,
+                lastCheck: new Date(),
+                lastError: message
+            });
+
+            console.error(
+                `${colors.cyan}[ LAVALINK ][NODE ]${colors.reset} ${
+                    colors.red
+                }${node.name}: ${message}${colors.reset}`
+            );
+
+            if (message.includes("after 3 attempts")) {
+                this.reconnectNodesNow(3000).catch(() => {});
             }
         });
     }
 
     findNodeIdByName(nodeName) {
         for (const [nodeId, node] of this.nodes.entries()) {
-            if (node.name === nodeName || node.id === nodeName || node.displayName === nodeName || node.originalName === nodeName) {
+            if (
+                node.name === nodeName ||
+                node.id === nodeName ||
+                node.displayName === nodeName ||
+                node.originalName === nodeName
+            ) {
                 return nodeId;
             }
         }
+
         return null;
     }
 
     getConnectedNodeCount() {
-        if (!this.riffy || !this.riffy.nodes) return 0;
-        
+        if (!this.riffy?.nodes) return 0;
+
         let count = 0;
+
         try {
-            if (this.riffy.nodes instanceof Map) {
-                for (const [nodeName, node] of this.riffy.nodes) { 
-                    if (node && (node.connected || node.state === 'CONNECTED')) {
-                        const nodeId = this.findNodeIdByName(nodeName);
-                        if (nodeId) {
-                            this.nodeStatus.set(nodeId, { online: true, lastCheck: new Date(), lastError: null });
-                        }
-                        count++;
+            const nodes = this.riffy.nodes;
+
+            const checkNode = (nodeName, node) => {
+                if (!node) return;
+
+                if (node.connected || node.state === "CONNECTED") {
+                    count++;
+
+                    const nodeId = this.findNodeIdByName(
+                        nodeName || node.name || node.identifier
+                    );
+
+                    if (nodeId) {
+                        this.nodeStatus.set(nodeId, {
+                            online: true,
+                            lastCheck: new Date(),
+                            lastError: null
+                        });
                     }
                 }
-            } else if (Array.isArray(this.riffy.nodes)) {
-                for (const node of this.riffy.nodes) {
-                    if (node && (node.connected || node.state === 'CONNECTED')) {
-                        const nodeName = node.name || node.identifier;
-                        const nodeId = this.findNodeIdByName(nodeName);
-                        if (nodeId) {
-                            this.nodeStatus.set(nodeId, { online: true, lastCheck: new Date(), lastError: null });
-                        }
-                        count++;
-                    }
+            };
+
+            if (nodes instanceof Map) {
+                for (const [name, node] of nodes) {
+                    checkNode(name, node);
                 }
-            } else if (typeof this.riffy.nodes === 'object') {
-                for (const nodeName in this.riffy.nodes) {
-                    const node = this.riffy.nodes[nodeName];
-                    if (node && (node.connected || node.state === 'CONNECTED')) {
-                        const nodeId = this.findNodeIdByName(nodeName);
-                        if (nodeId) {
-                            this.nodeStatus.set(nodeId, { online: true, lastCheck: new Date(), lastError: null });
-                        }
-                        count++;
-                    }
+            } else if (Array.isArray(nodes)) {
+                for (const node of nodes) {
+                    checkNode(node?.name || node?.identifier, node);
+                }
+            } else {
+                for (const name of Object.keys(nodes)) {
+                    checkNode(name, nodes[name]);
                 }
             }
+
         } catch (error) {
-        
+            console.error("[LAVALINK] Node status error:", error.message);
         }
 
-        if (count === 0) {
-            for (const status of this.nodeStatus.values()) {
-                if (status.online) count++;
-            }
-        }
         return count;
     }
 
     getTotalNodeCount() {
         return this.nodes.size;
     }
-
 
     getNodeCount() {
         return this.getConnectedNodeCount();
@@ -416,116 +546,114 @@ class LavalinkNodeManager {
     }
 
     async waitForNodeConnectEvent(timeout = 8000) {
-        return new Promise((resolve) => {
-            if (!this.riffy) {
-                resolve(false);
-                return;
-            }
+        if (!this.riffy || this.destroying) return false;
 
+        return new Promise(resolve => {
             let settled = false;
-            const onConnect = () => {
+
+            const finish = result => {
                 if (settled) return;
+
                 settled = true;
+
                 clearTimeout(timer);
-                resolve(true);
+
+                this.riffy?.off?.("nodeConnect", onConnect);
+
+                resolve(result);
             };
 
-            const timer = setTimeout(() => {
-                if (settled) return;
-                settled = true;
-                this.riffy?.off?.('nodeConnect', onConnect);
-                resolve(false);
-            }, timeout);
+            const onConnect = () => finish(true);
 
-            this.riffy.once('nodeConnect', onConnect);
+            const timer = setTimeout(
+                () => finish(false),
+                timeout
+            );
+
+            this.riffy.once("nodeConnect", onConnect);
         });
     }
 
     async waitForConnectedNode(maxWaitTime = 15000) {
-        if (this.hasConnectedNodes()) {
-            return true;
+        if (this.hasConnectedNodes()) return true;
+
+        if (!this.riffy || this.destroying) return false;
+
+        const startTime = Date.now();
+
+        while (
+            Date.now() - startTime < maxWaitTime &&
+            !this.destroying
+        ) {
+            if (this.hasConnectedNodes()) return true;
+
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
 
-        if (!this.riffy) {
-            return false;
-        }
-
-        return new Promise((resolve) => {
-            const startTime = Date.now();
-            
-            const checkInterval = setInterval(() => {
-                if (this.hasConnectedNodes()) {
-                    clearInterval(checkInterval);
-                    if (this.connectionResolve) {
-                        this.connectionResolve = null;
-                        this.connectionPromise = null;
-                    }
-                    resolve(true);
-                    return;
-                }
-
-                if (Date.now() - startTime >= maxWaitTime) {
-                    clearInterval(checkInterval);
-                    if (this.connectionResolve) {
-                        this.connectionResolve = null;
-                        this.connectionPromise = null;
-                    }
-                    resolve(false);
-                }
-            }, 500);
-
-            this.connectionPromise = new Promise((innerResolve) => {
-                this.connectionResolve = innerResolve;
-            });
-        });
+        return false;
     }
 
     async ensureNodeAvailable() {
-    
+        if (this.destroying) {
+            throw new Error("Lavalink manager is shutting down.");
+        }
+
         if (this.hasConnectedNodes()) return true;
 
-        const lang = getLangSync();
-        console.log(`${colors.cyan}[ LAVALINK ][WAIT ]${colors.reset} ${colors.yellow}${lang.console?.lavalink?.waitingForConnection || 'Waiting for Lavalink node connection...'}${colors.reset}`);
+        console.log(
+            `${colors.cyan}[ LAVALINK ][WAIT ]${colors.reset} Waiting for Lavalink node connection...`
+        );
 
         await this.reconnectNodesNow(5000);
-        const eventConnected = await this.waitForNodeConnectEvent(8000);
-        if (eventConnected || this.hasConnectedNodes()) {
-            const count = this.getConnectedNodeCount();
-            const lang = getLangSync();
-            console.log(`${colors.cyan}[ LAVALINK ][READY]${colors.reset} ${colors.green}${lang.console?.lavalink?.nodeAvailable?.replace('{count}', count) || `Node available (${count} connected)`}${colors.reset}`);
+
+        if (this.hasConnectedNodes()) {
+            console.log(
+                `${colors.cyan}[ LAVALINK ][READY]${colors.reset} Node available (${this.getConnectedNodeCount()} connected)`
+            );
+
             return true;
         }
 
-        throw new Error('No Lavalink nodes are currently available. Please check your node configuration.');
+        throw new Error(
+            "No Lavalink nodes are currently available. Please check your node configuration."
+        );
     }
 
     startHealthMonitoring() {
-   
+        if (this.healthCheckInterval || this.destroying) return;
+
         this.healthCheckInterval = setInterval(async () => {
+            if (this.destroying) return;
+
             const connected = this.getConnectedNodeCount();
             const total = this.getTotalNodeCount();
+
             if (connected === 0 && total > 0) {
-                const lang = getLangSync();
-                console.log(`${colors.cyan}[ LAVALINK ][STATUS]${colors.reset} ${colors.yellow}${lang.console?.lavalink?.noNodesConnected?.replace('{connected}', connected).replace('{total}', total) || `No nodes connected (${connected}/${total}) — attempting reconnect...`}${colors.reset}`);
+                console.log(
+                    `[LAVALINK] No nodes connected (${connected}/${total}). Reconnecting...`
+                );
+
                 await this.reconnectNodesNow(5000);
             }
-        }, 60000); 
+        }, 60000);
 
-  
         this.reconnectInterval = setInterval(async () => {
-            const connected = this.getConnectedNodeCount();
-            const total = this.getTotalNodeCount();
-            if (connected === 0 && total > 0) {
+            if (this.destroying) return;
+
+            if (
+                this.getConnectedNodeCount() === 0 &&
+                this.getTotalNodeCount() > 0
+            ) {
                 await this.reconnectNodesNow(5000);
             }
-        }, 30000); 
+        }, 30000);
 
-        // Initial status log
         setTimeout(() => {
-            const connected = this.getConnectedNodeCount();
-            const total = this.getTotalNodeCount();
-            const lang = getLangSync();
-            console.log(`${colors.cyan}[ LAVALINK ][STATUS]${colors.reset} ${connected > 0 ? colors.green : colors.red}${lang.console?.lavalink?.nodeStatusReport?.replace('{connected}', connected).replace('{total}', total) || `Node Status: ${connected}/${total} connected`}${colors.reset}`);
+            if (this.destroying) return;
+
+            console.log(
+                `[LAVALINK] Node Status: ${this.getConnectedNodeCount()}/${this.getTotalNodeCount()} connected`
+            );
         }, 5000);
     }
 
@@ -537,20 +665,18 @@ class LavalinkNodeManager {
             nodes: []
         };
 
-        const connectedCount = this.getConnectedNodeCount();
-
         for (const [nodeId, node] of this.nodes.entries()) {
-            const nodeStatus = this.nodeStatus.get(nodeId) || { online: false };
+            const nodeStatus = this.nodeStatus.get(nodeId) || {};
             const isConnected = this.isNodeConnected(nodeId);
-            
+
             status.nodes.push({
                 id: nodeId,
                 name: node.displayName || node.name || node.id,
                 host: node.host,
                 port: node.port,
                 online: isConnected,
-                lastCheck: nodeStatus.lastCheck,
-                lastError: nodeStatus.lastError
+                lastCheck: nodeStatus.lastCheck || null,
+                lastError: nodeStatus.lastError || null
             });
 
             if (isConnected) {
@@ -565,111 +691,132 @@ class LavalinkNodeManager {
 
     isNodeConnected(nodeId) {
         const node = this.nodes.get(nodeId);
+
         if (!node) return false;
 
-        // Prefer riffy state
-        if (this.riffy && this.riffy.nodes) {
+        if (this.riffy?.nodes) {
             try {
-                if (this.riffy.nodes instanceof Map) {
-                    for (const [nodeName, riffyNode] of this.riffy.nodes) {
-                        if ((nodeName === node.id || nodeName === node.displayName || nodeName === node.name) &&
-                            riffyNode && (riffyNode.connected || riffyNode.state === 'CONNECTED')) {
-                            return true;
-                        }
+                const nodes = this.riffy.nodes;
+
+                const matches = riffyNode => {
+                    if (!riffyNode) return false;
+
+                    return (
+                        riffyNode.host === node.host &&
+                        String(riffyNode.port) === String(node.port) ||
+                        riffyNode.name === node.id ||
+                        riffyNode.identifier === node.id
+                    ) && (
+                        riffyNode.connected ||
+                        riffyNode.state === "CONNECTED"
+                    );
+                };
+
+                if (nodes instanceof Map) {
+                    for (const riffyNode of nodes.values()) {
+                        if (matches(riffyNode)) return true;
                     }
-                } else if (Array.isArray(this.riffy.nodes)) {
-                    for (const riffyNode of this.riffy.nodes) {
-                        const nodeName = riffyNode.name || riffyNode.identifier;
-                        if ((nodeName === node.id || nodeName === node.displayName || nodeName === node.name) &&
-                            (riffyNode.connected || riffyNode.state === 'CONNECTED')) {
-                            return true;
-                        }
+                } else if (Array.isArray(nodes)) {
+                    for (const riffyNode of nodes) {
+                        if (matches(riffyNode)) return true;
                     }
-                } else if (typeof this.riffy.nodes === 'object') {
-                    for (const nodeName in this.riffy.nodes) {
-                        const riffyNode = this.riffy.nodes[nodeName];
-                        if ((nodeName === node.id || nodeName === node.displayName || nodeName === node.name) &&
-                            riffyNode && (riffyNode.connected || riffyNode.state === 'CONNECTED')) {
-                            return true;
-                        }
+                } else {
+                    for (const key of Object.keys(nodes)) {
+                        if (matches(nodes[key])) return true;
                     }
                 }
+
             } catch (_) {}
         }
 
-        // Fallback to nodeStatus
-        const status = this.nodeStatus.get(nodeId);
-        if (status && status.online) return true;
-
-        return false;
+        return this.nodeStatus.get(nodeId)?.online === true;
     }
 
     init(userId) {
-        if (this.riffy) {
+        if (
+            this.riffy &&
+            typeof this.riffy.init === "function"
+        ) {
             this.riffy.init(userId);
         }
     }
 
-  
-destroy() {
-    try {
-        // Stop health check interval
-        if (this.healthCheckInterval) {
-            clearInterval(this.healthCheckInterval);
-            this.healthCheckInterval = null;
-        }
+    destroy() {
+        if (this.destroying) return;
 
-        // Stop connection loop interval
-        if (this.connectLoopInterval) {
-            clearInterval(this.connectLoopInterval);
-            this.connectLoopInterval = null;
-        }
+        this.destroying = true;
 
-        // Safely clean up Riffy players if supported
-        if (this.riffy) {
-            const players = this.riffy.players;
+        try {
+            if (this.healthCheckInterval) {
+                clearInterval(this.healthCheckInterval);
+                this.healthCheckInterval = null;
+            }
 
-            if (players && typeof players.values === 'function') {
-                for (const player of players.values()) {
-                    try {
-                        if (typeof player.destroy === 'function') {
-                            player.destroy();
+            if (this.connectLoopInterval) {
+                clearInterval(this.connectLoopInterval);
+                this.connectLoopInterval = null;
+            }
+
+            if (this.reconnectInterval) {
+                clearInterval(this.reconnectInterval);
+                this.reconnectInterval = null;
+            }
+
+            if (this.connectionResolve) {
+                this.connectionResolve(false);
+                this.connectionResolve = null;
+                this.connectionPromise = null;
+            }
+
+            if (this.riffy) {
+                const players = this.riffy.players;
+
+                if (players && typeof players.values === "function") {
+                    for (const player of players.values()) {
+                        try {
+                            if (typeof player.destroy === "function") {
+                                player.destroy();
+                            }
+                        } catch (error) {
+                            console.error(
+                                "[LAVALINK] Player cleanup error:",
+                                error.message
+                            );
                         }
-                    } catch (error) {
-                        console.error(
-                            '[ LAVALINK ] Player cleanup error:',
-                            error.message
-                        );
                     }
                 }
+
+                // Riffy does not necessarily expose destroy().
+                // Never call it without checking its availability.
+                if (typeof this.riffy.destroy === "function") {
+                    this.riffy.destroy();
+                }
+
+                this.riffy = null;
             }
 
-            // Call manager cleanup only if actually available
-            if (typeof this.riffy.destroy === 'function') {
-                this.riffy.destroy();
-            }
+            this.initialized = false;
 
-            this.riffy = null;
+            console.log(
+                `${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.green}Cleanup completed successfully.${colors.reset}`
+            );
+
+        } catch (error) {
+            console.error(
+                "[LAVALINK] Shutdown cleanup error:",
+                error
+            );
         }
-
-        this.initialized = false;
-
-        console.log('[ LAVALINK ] Cleanup completed successfully.');
-
-    } catch (error) {
-        console.error(
-            '[ LAVALINK ] Shutdown cleanup error:',
-            error
-        );
     }
 }
 
-
+// Manager instance
 let nodeManagerInstance = null;
 
 async function initializeLavalinkManager(client) {
     if (!nodeManagerInstance) {
         nodeManagerInstance = new LavalinkNodeManager(client);
+
         await nodeManagerInstance.initializeRiffy();
     }
 
