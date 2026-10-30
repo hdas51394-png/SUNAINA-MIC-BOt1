@@ -1,213 +1,464 @@
-const { Client, GatewayIntentBits } = require("discord.js");
-const config = require("./config.js");
+
+require("dotenv").config();
+
+const {
+    Client,
+    GatewayIntentBits,
+    Events
+} = require("discord.js");
+
 const fs = require("fs");
-const path = require('path');
-const { initializePlayer } = require('./path/to/that/file');
-const { connectToDatabase } = require('./mongodb');
-const colors = require('./UI/colors/colors');
-const { getLavalinkManager } = require('./lavalink.js');
-const { getLang, getLangSync } = require('./utils/languageLoader.js');
-require('dotenv').config();
+const path = require("path");
+const express = require("express");
+
+const config = require("./config.js");
+const colors = require("./UI/colors/colors");
+const { connectToDatabase } = require("./mongodb");
+const {
+    initializePlayer,
+    getLavalinkManager
+} = require("./lavalink.js");
+
+const { getLangSync } = require("./utils/languageLoader.js");
+
+// ==========================================
+// CLIENT CONFIGURATION
+// ==========================================
 
 const client = new Client({
-    intents: Object.keys(GatewayIntentBits).map((a) => {
-        return GatewayIntentBits[a];
-    }),
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates
+    ]
 });
 
 client.config = config;
-
-
-process.on('unhandledRejection', (error) => {
-    const lang = getLangSync();
-    if (error && error.message && (
-        error.message.includes('Cannot read properties of null') ||
-        error.message.includes('track.info') ||
-        error.message.includes('thumbnail') ||
-        error.message.includes('player.restart is not a function') ||
-        error.message.includes('restart is not a function')
-    )) {
-   
-        if (error.message.includes('player.restart') || error.message.includes('restart is not a function')) {
-            console.warn(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.yellow}Ignoring Riffy reconnect bug: ${error.message}${colors.reset}`);
-        }
-        return;
-    }
-    
-    // timeout errors
-    if (error && (error.cause || error.message)) {
-        const cause = error.cause || {};
-        const errorMsg = error.message || '';
-        
-        if (cause.code === 'UND_ERR_CONNECT_TIMEOUT' || 
-            errorMsg.includes('Connect Timeout') || 
-            errorMsg.includes('fetch failed') ||
-            errorMsg.includes('ConnectTimeoutError')) {
-            console.warn(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.yellow}Connection timeout to Lavalink node - will retry automatically${colors.reset}`);
-            return; 
-        }
-    }
-    
-    console.error(lang.console?.bot?.unhandledRejection || 'Unhandled Rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-    const lang = getLangSync();
-    if (error && error.message && (
-        error.message.includes('Cannot read properties of null') ||
-        error.message.includes('track.info') ||
-        error.message.includes('thumbnail')
-    )) {
-        console.warn(lang.console?.bot?.riffyThumbnailError?.replace('{message}', error.message) || `[ Riffy ] Ignoring thumbnail error: ${error.message}`);
-        return;
-    }
-    console.error(lang.console?.bot?.uncaughtException || 'Uncaught Exception:', error);
-});
-
-initializePlayer(client).catch(error => {
-    const lang = getLangSync();
-    console.error(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.red}${lang.console?.bot?.lavalinkError?.replace('{message}', error.message) || `Error initializing player: ${error.message}`}${colors.reset}`);
-});
-
-client.on("clientReady", () => {
-    const lang = getLangSync();
-    console.log(`${colors.cyan}[ SYSTEM ]${colors.reset} ${colors.green}${lang.console?.bot?.clientLogged?.replace('{tag}', client.user.tag) || `Client logged as ${client.user.tag}`}${colors.reset}`);
-    console.log(`${colors.cyan}[ MUSIC ]${colors.reset} ${colors.green}${lang.console?.bot?.musicSystemReady || 'Riffy Music System Ready 🎵'}${colors.reset}`);
-   
-    const nodeManager = getLavalinkManager();
-    if (nodeManager) {
-        nodeManager.init(client.user.id);
-        
-        setTimeout(() => {
-            const status = nodeManager.getNodeStatus();
-            const availableCount = nodeManager.getNodeCount();
-            const totalCount = nodeManager.getTotalNodeCount();
-            
-            console.log(`${colors.cyan}[ LAVALINK ]${colors.reset} ${colors.green}${lang.console?.bot?.nodeManagerStatus?.replace('{available}', availableCount).replace('{total}', totalCount) || `Node Manager: ${availableCount}/${totalCount} nodes available`}${colors.reset}`);
-            
-            if (status.nodes.length > 0) {
-                console.log(`${colors.cyan}[ LAVALINK ]${colors.reset} ${lang.console?.bot?.nodeStatus || 'Node Status:'}`);
-                for (const node of status.nodes) {
-                    const statusIcon = node.online ? `${colors.green}✅${colors.reset}` : `${colors.red}❌${colors.reset}`;
-                    const statusText = node.online ? 'ONLINE' : 'OFFLINE';
-                    const errorText = node.lastError ? ` | ${colors.yellow}${node.lastError}${colors.reset}` : '';
-                    const nodeInfo = lang.console?.bot?.nodeInfo?.replace('{icon}', statusIcon).replace('{name}', node.name).replace('{host}', node.host).replace('{port}', node.port).replace('{status}', statusText).replace('{error}', errorText) || `  ${statusIcon} ${colors.yellow}${node.name}${colors.reset} (${node.host}:${node.port}) - ${statusText}${errorText}`;
-                    console.log(nodeInfo);
-                }
-            }
-        }, 3000);
-    } else if (client.riffy) {
-    client.riffy.init(client.user.id);
-    }
-});
-client.config = config;
-
-fs.readdir("./events", (_err, files) => {
-  files.forEach((file) => {
-    if (!file.endsWith(".js")) return;
-    const event = require(`./events/${file}`);
-    let eventName = file.split(".")[0]; 
-    client.on(eventName, event.bind(null, client));
-    delete require.cache[require.resolve(`./events/${file}`)];
-  });
-});
-
-
-
 client.commands = new Map();
 client.commandsArray = [];
 
+const PREFIX = colors.cyan;
+const RESET = colors.reset;
+const GREEN = colors.green;
+const RED = colors.red;
+const YELLOW = colors.yellow;
+const MAGENTA = colors.magenta;
 
-const loadCommands = () => {
-  const loadCommandsFromDir = (dir, category = '') => {
-    const items = fs.readdirSync(dir, { withFileTypes: true });
-    
-    for (const item of items) {
-      const fullPath = path.join(dir, item.name);
-      
-      if (item.isDirectory()) {
-    
-        loadCommandsFromDir(fullPath, item.name);
-      } else if (item.isFile() && item.name.endsWith('.js')) {
+function getLanguage() {
+    try {
+        return getLangSync() || {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function log(message) {
+    console.log(message);
+}
+
+// ==========================================
+// ERROR HANDLING
+// ==========================================
+
+process.on("unhandledRejection", (error) => {
+    console.error(
+        `${RED}[ UNHANDLED REJECTION ]${RESET}`,
+        error
+    );
+});
+
+process.on("uncaughtException", (error) => {
+    console.error(
+        `${RED}[ UNCAUGHT EXCEPTION ]${RESET}`,
+        error
+    );
+});
+
+// ==========================================
+// LOAD EVENTS
+// ==========================================
+
+function loadEvents() {
+    const eventsPath = path.join(__dirname, "events");
+
+    if (!fs.existsSync(eventsPath)) {
+        console.warn(
+            `${YELLOW}[ EVENTS ] Events directory not found.${RESET}`
+        );
+        return;
+    }
+
+    const eventFiles = fs.readdirSync(eventsPath)
+        .filter(file => file.endsWith(".js"));
+
+    for (const file of eventFiles) {
+        const filePath = path.join(eventsPath, file);
+
         try {
-       
-          const absolutePath = path.resolve(fullPath);
-          const command = require(absolutePath);
-          
-          if (command.data && command.run) {
-            client.commands.set(command.data.name, command);
-            client.commandsArray.push(command.data.toJSON());
-            const categoryInfo = category ? ` [${category}]` : '';
-            //console.log(`${colors.cyan}[ COMMANDS ]${colors.reset} ${colors.green}Loaded: ${colors.yellow}${command.data.name}${categoryInfo}${colors.reset}`);
-          } else {
-            const lang = getLangSync();
-            console.log(`${colors.cyan}[ COMMANDS ]${colors.reset} ${colors.red}${lang.console?.bot?.commandLoadFailed?.replace('{name}', item.name) || `Failed to load: ${item.name} - Missing data or run property`}${colors.reset}`);
-      }
+            const event = require(filePath);
+
+            if (typeof event !== "function") {
+                console.warn(
+                    `${YELLOW}[ EVENTS ] Invalid event: ${file}${RESET}`
+                );
+                continue;
+            }
+
+            const eventName = path.basename(file, ".js");
+
+            client.on(eventName, (...args) => {
+                try {
+                    const result = event(client, ...args);
+
+                    if (result && typeof result.catch === "function") {
+                        result.catch(error => {
+                            console.error(
+                                `[ EVENT ERROR ] ${eventName}:`,
+                                error
+                            );
+                        });
+                    }
+                } catch (error) {
+                    console.error(
+                        `[ EVENT ERROR ] ${eventName}:`,
+                        error
+                    );
+                }
+            });
+
+            log(
+                `${PREFIX}[ EVENTS ]${RESET} ${GREEN}Loaded: ${file}${RESET}`
+            );
+
         } catch (error) {
-          const lang = getLangSync();
-          console.error(`${colors.cyan}[ COMMANDS ]${colors.reset} ${colors.red}${lang.console?.bot?.commandLoadError?.replace('{name}', item.name).replace('{message}', error.message) || `Error loading ${item.name}: ${error.message}`}${colors.reset}`);
-    }
-      }
-    }
-  };
-  
-
-  const commandsDir = path.resolve(__dirname, config.commandsDir);
-  loadCommandsFromDir(commandsDir);
-  const lang = getLangSync();
-  console.log(`${colors.cyan}[ COMMANDS ]${colors.reset} ${colors.green}${lang.console?.bot?.commandsLoaded?.replace('{count}', client.commands.size) || `Total Commands Loaded: ${client.commands.size}`}${colors.reset}`);
-};
-
-loadCommands();
-
-
-client.on("raw", (d) => {
-    const { GatewayDispatchEvents } = require("discord.js");
-    if (![GatewayDispatchEvents.VoiceStateUpdate, GatewayDispatchEvents.VoiceServerUpdate].includes(d.t)) return;
-    if (config.voiceDebug === true) {
-        if (d.t === GatewayDispatchEvents.VoiceStateUpdate) {
-            const isBot = d.d?.user_id === client.user?.id;
-            console.log(`[ VOICE DEBUG ] raw=${d.t} guild=${d.d?.guild_id || 'null'} botUser=${isBot} channel=${d.d?.channel_id || 'null'} sessionId=${d.d?.session_id ? 'yes' : 'no'}`);
-        } else {
-            console.log(`[ VOICE DEBUG ] raw=${d.t} guild=${d.d?.guild_id || 'null'} endpoint=${d.d?.endpoint ? 'yes' : 'no'} token=${d.d?.token ? 'yes' : 'no'}`);
+            console.error(
+                `${RED}[ EVENTS ] Failed to load ${file}:${RESET}`,
+                error
+            );
         }
     }
-    client.riffy.updateVoiceState(d);
+}
+
+// ==========================================
+// LOAD COMMANDS
+// ==========================================
+
+function loadCommands() {
+    const commandsDir = path.resolve(
+        __dirname,
+        config.commandsDir || "commands"
+    );
+
+    if (!fs.existsSync(commandsDir)) {
+        console.error(
+            `${RED}[ COMMANDS ] Directory not found: ${commandsDir}${RESET}`
+        );
+        return;
+    }
+
+    function loadFromDirectory(directory) {
+        const items = fs.readdirSync(directory, {
+            withFileTypes: true
+        });
+
+        for (const item of items) {
+            const fullPath = path.join(directory, item.name);
+
+            if (item.isDirectory()) {
+                loadFromDirectory(fullPath);
+                continue;
+            }
+
+            if (!item.isFile() || !item.name.endsWith(".js")) {
+                continue;
+            }
+
+            try {
+                const command = require(fullPath);
+
+                if (
+                    !command ||
+                    !command.data ||
+                    typeof command.run !== "function" ||
+                    typeof command.data.toJSON !== "function"
+                ) {
+                    console.warn(
+                        `${YELLOW}[ COMMANDS ] Invalid command: ${item.name}${RESET}`
+                    );
+                    continue;
+                }
+
+                const commandData = command.data.toJSON();
+
+                if (!commandData.name) {
+                    console.warn(
+                        `${YELLOW}[ COMMANDS ] Missing command name: ${item.name}${RESET}`
+                    );
+                    continue;
+                }
+
+                if (client.commands.has(commandData.name)) {
+                    console.warn(
+                        `${YELLOW}[ COMMANDS ] Duplicate command: ${commandData.name}${RESET}`
+                    );
+                    continue;
+                }
+
+                client.commands.set(commandData.name, command);
+                client.commandsArray.push(commandData);
+
+                log(
+                    `${PREFIX}[ COMMANDS ]${RESET} ${GREEN}Loaded: ${commandData.name}${RESET}`
+                );
+
+            } catch (error) {
+                console.error(
+                    `${RED}[ COMMANDS ] Error loading ${item.name}:${RESET}`,
+                    error
+                );
+            }
+        }
+    }
+
+    loadFromDirectory(commandsDir);
+
+    log(
+        `${PREFIX}[ COMMANDS ]${RESET} ${GREEN}Total Commands Loaded: ${client.commands.size}${RESET}`
+    );
+}
+
+// ==========================================
+// LAVALINK INITIALIZATION
+// ==========================================
+
+async function setupLavalink() {
+    try {
+        await initializePlayer(client);
+
+        log(
+            `${PREFIX}[ LAVALINK ]${RESET} ${GREEN}Player initialized successfully.${RESET}`
+        );
+
+    } catch (error) {
+        console.error(
+            `${RED}[ LAVALINK ] Initialization failed:${RESET}`,
+            error
+        );
+
+        throw error;
+    }
+}
+
+// ==========================================
+// CLIENT READY
+// ==========================================
+
+client.once(Events.ClientReady, () => {
+    const lang = getLanguage();
+
+    log("\n" + "─".repeat(45));
+
+    log(
+        `${PREFIX}[ SYSTEM ]${RESET} ${GREEN}${lang.console?.bot?.clientLogged?.replace("{tag}", client.user.tag) || `Logged in as ${client.user.tag}`}${RESET}`
+    );
+
+    log(
+        `${PREFIX}[ MUSIC ]${RESET} ${GREEN}${lang.console?.bot?.musicSystemReady || "Music System Ready 🎵"}${RESET}`
+    );
+
+    log("─".repeat(45));
+
+    try {
+        const nodeManager = getLavalinkManager();
+
+        if (nodeManager) {
+            nodeManager.init(client.user.id);
+
+            setTimeout(() => {
+                try {
+                    const status = nodeManager.getNodeStatus();
+                    const available = nodeManager.getNodeCount();
+                    const total = nodeManager.getTotalNodeCount();
+
+                    log(
+                        `${PREFIX}[ LAVALINK ]${RESET} ${GREEN}Nodes: ${available}/${total}${RESET}`
+                    );
+
+                    if (status?.nodes?.length) {
+                        for (const node of status.nodes) {
+                            const icon = node.online ? "✅" : "❌";
+
+                            log(
+                                `${PREFIX}[ NODE ]${RESET} ${icon} ${node.name} (${node.host}:${node.port})`
+                            );
+
+                            if (node.lastError) {
+                                log(
+                                    `${YELLOW}${node.lastError}${RESET}`
+                                );
+                            }
+                        }
+                    }
+
+                } catch (error) {
+                    console.error(
+                        "[ LAVALINK ] Node status error:",
+                        error
+                    );
+                }
+            }, 3000);
+
+        } else if (client.riffy) {
+            client.riffy.init(client.user.id);
+        }
+
+    } catch (error) {
+        console.error(
+            "[ LAVALINK ] Node manager error:",
+            error
+        );
+    }
 });
 
-client.login(config.TOKEN || process.env.TOKEN).catch((e) => {
-  const lang = getLangSync();
-  console.log('\n' + '─'.repeat(40));
-  console.log(`${colors.magenta}${colors.bright}${lang.console?.bot?.tokenVerification || '🔐 TOKEN VERIFICATION'}${colors.reset}`);
-  console.log('─'.repeat(40));
-  console.log(`${colors.cyan}[ TOKEN ]${colors.reset} ${colors.red}${lang.console?.bot?.tokenAuthFailed || 'Authentication Failed ❌'}${colors.reset}`);
-  console.log(`${colors.gray}${lang.console?.bot?.tokenError || 'Error: Turn On Intents or Reset New Token'}${colors.reset}`);
+// ==========================================
+// RIFFY VOICE STATE UPDATES
+// ==========================================
+
+client.on("raw", (packet) => {
+    try {
+        const {
+            GatewayDispatchEvents
+        } = require("discord.js");
+
+        if (
+            ![
+                GatewayDispatchEvents.VoiceStateUpdate,
+                GatewayDispatchEvents.VoiceServerUpdate
+            ].includes(packet.t)
+        ) {
+            return;
+        }
+
+        if (config.voiceDebug === true) {
+            console.log(
+                `[ VOICE DEBUG ] Event: ${packet.t}`
+            );
+        }
+
+        if (client.riffy?.updateVoiceState) {
+            client.riffy.updateVoiceState(packet);
+        }
+
+    } catch (error) {
+        console.error(
+            "[ VOICE ERROR ]",
+            error
+        );
+    }
 });
-connectToDatabase().then(() => {
-  const lang = getLangSync();
-  console.log(`${colors.cyan}[ DATABASE ]${colors.reset} ${colors.green}${lang.console?.bot?.databaseOnline || 'MongoDB Online ✅'}${colors.reset}`);
-}).catch((err) => {
-  const lang = getLangSync();
-  console.log('\n' + '─'.repeat(40));
-  console.log(`${colors.magenta}${colors.bright}${lang.console?.bot?.databaseStatus || '🕸️  DATABASE STATUS'}${colors.reset}`);
-  console.log('─'.repeat(40));
-  console.log(`${colors.cyan}[ DATABASE ]${colors.reset} ${colors.red}${lang.console?.bot?.databaseFailed || 'Connection Failed ❌'}${colors.reset}`);
-  console.log(`${colors.gray}${lang.console?.bot?.databaseError?.replace('{message}', err.message) || `Error: ${err.message}`}${colors.reset}`);
-});
-const express = require("express");
+
+// ==========================================
+// EXPRESS WEB SERVER
+// ==========================================
+
 const app = express();
-const port = 3000;
-app.get('/', (req, res) => {
-    const imagePath = path.join(__dirname, 'index.html');
-    res.sendFile(imagePath);
+const PORT = Number(process.env.PORT) || 3000;
+
+app.disable("x-powered-by");
+
+app.get("/", (req, res) => {
+    const indexPath = path.join(__dirname, "index.html");
+
+    if (!fs.existsSync(indexPath)) {
+        return res.status(404).send("index.html not found.");
+    }
+
+    res.sendFile(indexPath);
 });
 
-app.listen(port, () => {
-    console.log('\n' + '─'.repeat(40));
-    console.log(`${colors.magenta}${colors.bright}🌐 SERVER STATUS${colors.reset}`);
-    console.log('─'.repeat(40));
-    console.log(`${colors.cyan}[ SERVER ]${colors.reset} ${colors.green}Online ✅${colors.reset}`);
-    console.log(`${colors.cyan}[ PORT ]${colors.reset} ${colors.yellow}http://localhost:${port}${colors.reset}`);
-    console.log(`${colors.cyan}[ TIME ]${colors.reset} ${colors.gray}${new Date().toISOString().replace('T', ' ').split('.')[0]}${colors.reset}`);
-    console.log(`${colors.cyan}[ USER ]${colors.reset} ${colors.yellow}GlaceYT${colors.reset}`);
+app.get("/health", (req, res) => {
+    res.json({
+        status: "online",
+        bot: client.isReady(),
+        uptime: process.uptime()
+    });
 });
+
+app.listen(PORT, "0.0.0.0", () => {
+    log("\n" + "─".repeat(45));
+
+    log(
+        `${MAGENTA}🌐 SERVER STATUS${RESET}`
+    );
+
+    log(
+        `${PREFIX}[ SERVER ]${RESET} ${GREEN}Online ✅${RESET}`
+    );
+
+    log(
+        `${PREFIX}[ PORT ]${RESET} ${YELLOW}${PORT}${RESET}`
+    );
+
+    log(
+        `${PREFIX}[ TIME ]${RESET} ${new Date().toISOString()}`
+    );
+
+    log("─".repeat(45));
+});
+
+// ==========================================
+// START BOT
+// ==========================================
+
+async function startBot() {
+    try {
+        log(
+            `${PREFIX}[ SYSTEM ]${RESET} Starting bot...`
+        );
+
+        loadEvents();
+        loadCommands();
+
+        // Initialize Lavalink before Discord login.
+        await setupLavalink();
+
+        // Connect to MongoDB.
+        try {
+            await connectToDatabase();
+
+            log(
+                `${PREFIX}[ DATABASE ]${RESET} ${GREEN}MongoDB Connected ✅${RESET}`
+            );
+
+        } catch (error) {
+            console.error(
+                `${RED}[ DATABASE ] Connection failed:${RESET}`,
+                error.message
+            );
+        }
+
+        // Discord login.
+        const token = config.TOKEN || process.env.TOKEN;
+
+        if (!token) {
+            throw new Error(
+                "Discord bot token is missing. Check config.js or .env."
+            );
+        }
+
+        await client.login(token);
+
+        log(
+            `${PREFIX}[ SYSTEM ]${RESET} ${GREEN}Login successful.${RESET}`
+        );
+
+    } catch (error) {
+        console.error(
+            `${RED}[ STARTUP ERROR ]${RESET}`,
+            error
+        );
+
+        process.exitCode = 1;
+    }
+}
+
+startBot();
