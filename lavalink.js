@@ -628,6 +628,7 @@ class LavalinkNodeManager {
 }
 
 
+
 let nodeManagerInstance = null;
 
 async function initializeLavalinkManager(client) {
@@ -636,7 +637,6 @@ async function initializeLavalinkManager(client) {
         await nodeManagerInstance.initializeRiffy();
     }
 
-    // Make Riffy accessible to the main bot file.
     if (client && nodeManagerInstance.riffy) {
         client.riffy = nodeManagerInstance.riffy;
     }
@@ -644,9 +644,8 @@ async function initializeLavalinkManager(client) {
     return nodeManagerInstance;
 }
 
-// Backward-compatible alias for bot.js
 async function initializePlayer(client) {
-    return await initializeLavalinkManager(client);
+    return initializeLavalinkManager(client);
 }
 
 function getLavalinkManager() {
@@ -658,4 +657,3 @@ module.exports = {
     initializeLavalinkManager,
     getLavalinkManager
 };
-
