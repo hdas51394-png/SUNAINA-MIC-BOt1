@@ -233,23 +233,19 @@ function loadCommands() {
 // LAVALINK INITIALIZATION
 // ==========================================
 
+
 async function setupLavalink() {
     try {
         await initializePlayer(client);
 
-        log(
-            `${PREFIX}[ LAVALINK ]${RESET} ${GREEN}Player initialized successfully.${RESET}`
-        );
+        console.log("[ LAVALINK ] Player initialized successfully.");
 
     } catch (error) {
-        console.error(
-            `${RED}[ LAVALINK ] Initialization failed:${RESET}`,
-            error
-        );
-
+        console.error("[ LAVALINK ] Initialization failed:", error);
         throw error;
     }
 }
+
 
 // ==========================================
 // CLIENT READY
