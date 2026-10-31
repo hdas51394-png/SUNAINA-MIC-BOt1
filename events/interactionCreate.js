@@ -1,4 +1,3 @@
-
 const { Events } = require('discord.js');
 const { getLavalinkManager } = require('../../lavalink.js');
 
