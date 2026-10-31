@@ -90,6 +90,16 @@ function loadEvents() {
 
     for (const file of eventFiles) {
         const filePath = path.join(eventsPath, file);
+        const eventName = path.basename(file, ".js");
+
+        // InteractionCreate is handled centrally below.
+        // Prevent duplicate or invalid autocomplete handlers.
+        if (eventName === "interactionCreate") {
+            console.log(
+                `${YELLOW}[ EVENTS ] interactionCreate.js handled centrally.${RESET}`
+            );
+            continue;
+        }
 
         try {
             const event = require(filePath);
@@ -100,8 +110,6 @@ function loadEvents() {
                 );
                 continue;
             }
-
-            const eventName = path.basename(file, ".js");
 
             client.on(eventName, (...args) => {
                 try {
@@ -115,6 +123,7 @@ function loadEvents() {
                             );
                         });
                     }
+
                 } catch (error) {
                     console.error(
                         `[ EVENT ERROR ] ${eventName}:`,
@@ -225,11 +234,140 @@ function loadCommands() {
 }
 
 // ==========================================
+// CENTRAL INTERACTION HANDLER
+// ==========================================
+
+function setupInteractionHandler() {
+
+    client.on(Events.InteractionCreate, async (interaction) => {
+
+        try {
+
+            // ======================================
+            // AUTOCOMPLETE HANDLER
+            // ======================================
+
+            if (interaction.isAutocomplete()) {
+
+                const command = client.commands.get(
+                    interaction.commandName
+                );
+
+                if (!command || typeof command.run !== "function") {
+
+                    if (!interaction.responded) {
+                        await interaction.respond([]);
+                    }
+
+                    return;
+                }
+
+                try {
+
+                    await command.run(client, interaction);
+
+                } catch (error) {
+
+                    console.error(
+                        `[ AUTOCOMPLETE ERROR ] ${interaction.commandName}:`,
+                        error
+                    );
+
+                    if (!interaction.responded) {
+                        await interaction.respond([]).catch(() => {});
+                    }
+                }
+
+                return;
+            }
+
+            // ======================================
+            // SLASH COMMAND HANDLER
+            // ======================================
+
+            if (interaction.isChatInputCommand()) {
+
+                const command = client.commands.get(
+                    interaction.commandName
+                );
+
+                if (!command) {
+                    console.warn(
+                        `[ COMMAND ] Unknown command: ${interaction.commandName}`
+                    );
+                    return;
+                }
+
+                try {
+
+                    await command.run(client, interaction);
+
+                } catch (error) {
+
+                    console.error(
+                        `[ COMMAND ERROR ] ${interaction.commandName}:`,
+                        error
+                    );
+
+                    try {
+
+                        if (interaction.deferred || interaction.replied) {
+
+                            await interaction.followUp({
+                                content: "❌ An error occurred while executing this command.",
+                                ephemeral: true
+                            });
+
+                        } else {
+
+                            await interaction.reply({
+                                content: "❌ An error occurred while executing this command.",
+                                ephemeral: true
+                            });
+                        }
+
+                    } catch (replyError) {
+                        console.error(
+                            "[ COMMAND ERROR RESPONSE ]",
+                            replyError
+                        );
+                    }
+                }
+
+                return;
+            }
+
+            // Other interaction types are left untouched.
+
+        } catch (error) {
+
+            console.error(
+                "[ INTERACTION CREATE ERROR ]",
+                error
+            );
+
+            if (
+                interaction.isAutocomplete?.() &&
+                !interaction.responded
+            ) {
+                await interaction.respond([]).catch(() => {});
+            }
+        }
+    });
+
+    console.log(
+        `${PREFIX}[ INTERACTIONS ]${RESET} ${GREEN}Central interaction handler loaded.${RESET}`
+    );
+}
+
+// ==========================================
 // LAVALINK INITIALIZATION
 // ==========================================
 
 async function setupLavalink() {
+
     try {
+
         const manager = await initializePlayer(client);
 
         if (!manager || !manager.riffy) {
@@ -238,7 +376,6 @@ async function setupLavalink() {
             );
         }
 
-        // Make Riffy available to other bot modules.
         client.riffy = manager.riffy;
 
         console.log(
@@ -248,6 +385,7 @@ async function setupLavalink() {
         return manager;
 
     } catch (error) {
+
         console.error(
             `${RED}[ LAVALINK ] Initialization failed:${RESET}`,
             error
@@ -262,6 +400,7 @@ async function setupLavalink() {
 // ==========================================
 
 client.once(Events.ClientReady, () => {
+
     const lang = getLanguage();
 
     console.log("\n" + "─".repeat(45));
@@ -277,13 +416,17 @@ client.once(Events.ClientReady, () => {
     console.log("─".repeat(45));
 
     try {
+
         const manager = getLavalinkManager();
 
         if (manager) {
+
             manager.init(client.user.id);
 
             setTimeout(() => {
+
                 try {
+
                     const status = manager.getNodeStatus();
                     const available = manager.getNodeCount();
                     const total = manager.getTotalNodeCount();
@@ -293,7 +436,9 @@ client.once(Events.ClientReady, () => {
                     );
 
                     if (status?.nodes?.length) {
+
                         for (const node of status.nodes) {
+
                             const icon = node.online ? "✅" : "❌";
 
                             console.log(
@@ -309,15 +454,18 @@ client.once(Events.ClientReady, () => {
                     }
 
                 } catch (error) {
+
                     console.error(
                         "[ LAVALINK ] Status error:",
                         error
                     );
                 }
+
             }, 3000);
         }
 
     } catch (error) {
+
         console.error(
             "[ LAVALINK ] Ready error:",
             error
@@ -330,7 +478,9 @@ client.once(Events.ClientReady, () => {
 // ==========================================
 
 client.on("raw", (packet) => {
+
     try {
+
         if (
             packet.t !== GatewayDispatchEvents.VoiceStateUpdate &&
             packet.t !== GatewayDispatchEvents.VoiceServerUpdate
@@ -349,6 +499,7 @@ client.on("raw", (packet) => {
         }
 
     } catch (error) {
+
         console.error(
             "[ VOICE ERROR ]",
             error
@@ -367,6 +518,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.disable("x-powered-by");
 
 app.get("/", (req, res) => {
+
     const indexPath = path.join(__dirname, "index.html");
 
     if (!fs.existsSync(indexPath)) {
@@ -377,6 +529,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
+
     res.json({
         status: "online",
         bot: client.isReady(),
@@ -385,6 +538,7 @@ app.get("/health", (req, res) => {
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {
+
     console.log("\n" + "─".repeat(45));
 
     console.log(
@@ -411,19 +565,28 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 // ==========================================
 
 async function startBot() {
+
     try {
+
         console.log(
             `${PREFIX}[ SYSTEM ]${RESET} Starting bot...`
         );
 
+        // Load event files.
         loadEvents();
+
+        // Load all commands first.
         loadCommands();
+
+        // Register central interaction handler.
+        setupInteractionHandler();
 
         // Initialize Lavalink.
         await setupLavalink();
 
         // Connect MongoDB.
         try {
+
             await connectToDatabase();
 
             console.log(
@@ -431,6 +594,7 @@ async function startBot() {
             );
 
         } catch (error) {
+
             console.error(
                 `${RED}[ DATABASE ] Connection failed:${RESET}`,
                 error.message
@@ -453,6 +617,7 @@ async function startBot() {
         );
 
     } catch (error) {
+
         console.error(
             `${RED}[ STARTUP ERROR ]${RESET}`,
             error
@@ -467,9 +632,11 @@ async function startBot() {
 // ==========================================
 
 async function shutdown() {
+
     console.log("[ SYSTEM ] Shutting down...");
 
     try {
+
         const manager = getLavalinkManager();
 
         if (manager) {
@@ -485,7 +652,9 @@ async function shutdown() {
         setTimeout(() => process.exit(1), 5000).unref();
 
     } catch (error) {
+
         console.error("[ SHUTDOWN ERROR ]", error);
+
         process.exit(1);
     }
 }
