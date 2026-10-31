@@ -3,6 +3,7 @@ const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const config = require('../../config.js');
 const SpotifyWebApi = require('spotify-web-api-node');
 const { getData } = require('spotify-url-info')(require('node-fetch'));
+
 const {
     sendErrorResponse,
     handleCommandError,
@@ -11,12 +12,17 @@ const {
     sanitizeTitle,
     stripLeadingIcons
 } = require('../../utils/responseHandler.js');
+
 const { checkVoiceChannel: checkVC } = require('../../utils/voiceChannelCheck.js');
 const { getLavalinkManager } = require('../../lavalink.js');
 const { getLang } = require('../../utils/languageLoader');
 const { getEmoji } = require('../../UI/emojis/emoji');
 
 const requesters = new Map();
+
+// ==========================================
+// DURATION FORMATTER
+// ==========================================
 
 function formatDuration(ms) {
     const seconds = Math.floor((ms / 1000) % 60);
@@ -26,26 +32,37 @@ function formatDuration(ms) {
     return [
         hours > 0 ? `${hours}h` : null,
         minutes > 0 ? `${minutes}m` : null,
-        `${seconds}s`,
-    ]
-        .filter(Boolean)
-        .join(' ');
+        `${seconds}s`
+    ].filter(Boolean).join(' ');
 }
+
+// ==========================================
+// SLASH COMMAND
+// ==========================================
 
 const data = new SlashCommandBuilder()
     .setName('play')
     .setDescription('Play a song from a name or link')
     .addStringOption(option =>
-        option.setName('name')
+        option
+            .setName('name')
             .setDescription('Enter song name / link or playlist')
             .setRequired(true)
             .setAutocomplete(true)
     );
 
+// ==========================================
+// SPOTIFY API
+// ==========================================
+
 const spotifyApi = new SpotifyWebApi({
     clientId: config.spotifyClientId,
-    clientSecret: config.spotifyClientSecret,
+    clientSecret: config.spotifyClientSecret
 });
+
+// ==========================================
+// WAIT FOR PLAYER CONNECTION
+// ==========================================
 
 async function waitForPlayerConnection(player, timeoutMs = 7000) {
     const startedAt = Date.now();
@@ -61,9 +78,14 @@ async function waitForPlayerConnection(player, timeoutMs = 7000) {
     return false;
 }
 
+// ==========================================
+// SPOTIFY PLAYLIST TRACKS
+// ==========================================
+
 async function getSpotifyPlaylistTracks(playlistId) {
     try {
         const data = await spotifyApi.clientCredentialsGrant();
+
         spotifyApi.setAccessToken(data.body.access_token);
 
         let tracks = [];
@@ -81,52 +103,78 @@ async function getSpotifyPlaylistTracks(playlistId) {
             offset += limit;
 
             for (const item of response.body.items) {
-                if (item.track && item.track.name && item.track.artists) {
+                if (
+                    item.track &&
+                    item.track.name &&
+                    item.track.artists
+                ) {
                     const trackName =
                         `${item.track.name} - ${item.track.artists.map(a => a.name).join(', ')}`;
 
                     tracks.push(trackName);
                 }
             }
+
         } while (offset < total);
 
         return tracks;
 
     } catch (error) {
-        console.error('Error fetching Spotify playlist tracks:', error);
+        console.error('[SPOTIFY PLAYLIST ERROR]', error);
         return [];
     }
 }
 
+// ==========================================
+// MAIN COMMAND
+// ==========================================
+
 module.exports = {
+
     data,
 
     run: async (client, interaction) => {
+
         try {
 
             // ==========================================
-            // PLAY AUTOCOMPLETE HANDLER - FIXED
+            // AUTOCOMPLETE HANDLER
             // ==========================================
 
             if (interaction.isAutocomplete()) {
+
+                if (interaction.commandName !== 'play') {
+                    return;
+                }
+
                 let responded = false;
+                let timeout;
 
                 const safeRespond = async (choices = []) => {
-                    if (responded || interaction.responded) return;
+
+                    if (responded || interaction.responded) {
+                        return;
+                    }
 
                     responded = true;
 
                     try {
-                        await interaction.respond(choices.slice(0, 25));
+                        await interaction.respond(
+                            Array.isArray(choices)
+                                ? choices.slice(0, 25)
+                                : []
+                        );
+
                     } catch (error) {
                         console.error(
-                            '[PLAY AUTOCOMPLETE] Respond failed:',
+                            '[PLAY AUTOCOMPLETE RESPONSE ERROR]',
                             error
                         );
                     }
                 };
 
                 try {
+
                     const focusedOption =
                         interaction.options.getFocused(true);
 
@@ -144,7 +192,9 @@ module.exports = {
                         return;
                     }
 
+                    // Search Lavalink
                     const searchPromise = (async () => {
+
                         const nodeManager = getLavalinkManager();
 
                         if (!nodeManager || !client.riffy) {
@@ -166,33 +216,44 @@ module.exports = {
                         }
 
                         return result.tracks.slice(0, 25).map(track => {
+
                             const info = track?.info || {};
+
+                            const title = info.title || 'Unknown Song';
+                            const author = info.author || 'Unknown Artist';
 
                             const duration = formatDuration(
                                 Number(info.length) || 0
                             );
 
                             const display =
-                                `${info.title || 'Unknown'} - ${info.author || 'Unknown'} (${duration})`;
+                                `${title} - ${author} (${duration})`;
 
                             const value =
                                 typeof info.uri === 'string' &&
-                                info.uri.length > 0
-                                    ? info.uri.slice(0, 100)
+                                info.uri.length > 0 &&
+                                info.uri.length <= 100
+                                    ? info.uri
                                     : query.slice(0, 100);
 
                             return {
                                 name: display.length > 100
-                                    ? `${display.slice(0, 97)}...`
+                                    ? display.slice(0, 97) + '...'
                                     : display,
+
                                 value
                             };
                         });
+
                     })();
 
                     // Discord autocomplete timeout protection
                     const timeoutPromise = new Promise(resolve => {
-                        setTimeout(() => resolve([]), 1800);
+
+                        timeout = setTimeout(() => {
+                            resolve([]);
+                        }, 1800);
+
                     });
 
                     const choices = await Promise.race([
@@ -200,9 +261,14 @@ module.exports = {
                         timeoutPromise
                     ]);
 
+                    clearTimeout(timeout);
+
                     await safeRespond(choices);
 
                 } catch (error) {
+
+                    clearTimeout(timeout);
+
                     console.error(
                         '[PLAY AUTOCOMPLETE ERROR]',
                         error
@@ -225,7 +291,11 @@ module.exports = {
 
             const deferred = await safeDeferReply(interaction);
 
-            if (!deferred && !interaction.deferred && !interaction.replied) {
+            if (
+                !deferred &&
+                !interaction.deferred &&
+                !interaction.replied
+            ) {
                 return;
             }
 
@@ -238,44 +308,62 @@ module.exports = {
             );
 
             if (!voiceCheck.allowed) {
+
                 const reply = await interaction.editReply(
                     voiceCheck.response
                 );
 
-                setTimeout(() => reply.delete().catch(() => {}), 5000);
+                setTimeout(() => {
+                    reply.delete().catch(() => {});
+                }, 5000);
 
                 return reply;
             }
 
+            // ==========================================
+            // LAVALINK MANAGER
+            // ==========================================
+
             const nodeManager = getLavalinkManager();
 
             if (!nodeManager) {
+
                 return sendErrorResponse(
                     interaction,
+
                     t.lavalinkManagerError.title + '\n\n' +
                     t.lavalinkManagerError.message + '\n' +
                     t.lavalinkManagerError.note,
+
                     5000
                 );
             }
 
             try {
+
                 await nodeManager.ensureNodeAvailable();
 
             } catch (error) {
+
                 const nodeCount = nodeManager.getNodeCount();
                 const totalCount = nodeManager.getTotalNodeCount();
 
                 return sendErrorResponse(
                     interaction,
+
                     t.noNodes.title + '\n\n' +
                     t.noNodes.message
                         .replace('{connected}', nodeCount)
                         .replace('{total}', totalCount) + '\n' +
                     t.noNodes.note,
+
                     5000
                 );
             }
+
+            // ==========================================
+            // VOICE CHANNEL
+            // ==========================================
 
             const userVoiceChannel =
                 interaction.member.voice.channelId;
@@ -284,40 +372,66 @@ module.exports = {
                 existingPlayer &&
                 existingPlayer.voiceChannel !== userVoiceChannel
             ) {
+
                 try {
+
                     const { cleanupTrackMessages } =
                         require('../../player.js');
 
-                    await cleanupTrackMessages(client, existingPlayer);
+                    await cleanupTrackMessages(
+                        client,
+                        existingPlayer
+                    );
 
                     existingPlayer.queue.clear();
                     existingPlayer.stop();
 
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                    await new Promise(resolve =>
+                        setTimeout(resolve, 300)
+                    );
 
                     existingPlayer.destroy();
 
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    await new Promise(resolve =>
+                        setTimeout(resolve, 500)
+                    );
 
                 } catch (error) {
-                    console.error('Error destroying old player:', error);
+
+                    console.error(
+                        'Error destroying old player:',
+                        error
+                    );
 
                     try {
+
                         if (!existingPlayer.destroyed) {
+
                             existingPlayer.destroy();
 
                             await new Promise(resolve =>
                                 setTimeout(resolve, 500)
                             );
                         }
+
                     } catch (e) {}
                 }
             }
 
+            // ==========================================
+            // NODE HEALTH
+            // ==========================================
+
             await nodeManager.checkAllNodesHealth().catch(() => {});
             await nodeManager.forceConnectAllNodes().catch(() => {});
 
-            await new Promise(resolve => setTimeout(resolve, 400));
+            await new Promise(resolve =>
+                setTimeout(resolve, 400)
+            );
+
+            // ==========================================
+            // CREATE PLAYER CONNECTION
+            // ==========================================
 
             let player;
             let attempts = 0;
@@ -325,9 +439,11 @@ module.exports = {
             const maxAttempts = 3;
 
             while (attempts < maxAttempts) {
+
                 await nodeManager.ensureNodeAvailable();
 
                 try {
+
                     player = client.riffy.createConnection({
                         guildId: interaction.guildId,
                         voiceChannel: userVoiceChannel,
@@ -338,6 +454,7 @@ module.exports = {
                     break;
 
                 } catch (err) {
+
                     attempts++;
 
                     const msg = err?.message || '';
@@ -349,6 +466,7 @@ module.exports = {
                             msg.includes('fetch failed')
                         )
                     ) {
+
                         await nodeManager.reconnectNodesNow?.(5000)
                             .catch(() => {});
 
@@ -362,6 +480,7 @@ module.exports = {
                     }
 
                     if (attempts >= maxAttempts) {
+
                         await nodeManager.refreshRiffy?.();
 
                         await nodeManager.ensureNodeAvailable();
@@ -380,24 +499,28 @@ module.exports = {
                 }
             }
 
+            // ==========================================
+            // TRACK PROCESSING
+            // ==========================================
+
             let tracksToQueue = [];
             let isPlaylist = false;
 
-            // ==========================================
-            // SPOTIFY SUPPORT
-            // ==========================================
-
             if (query.includes('spotify.com')) {
+
                 try {
+
                     const spotifyData = await getData(query);
 
                     if (spotifyData.type === 'track') {
+
                         const trackName =
                             `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(', ')}`;
 
                         tracksToQueue.push(trackName);
 
                     } else if (spotifyData.type === 'playlist') {
+
                         isPlaylist = true;
 
                         const playlistId =
@@ -408,13 +531,19 @@ module.exports = {
                     }
 
                 } catch (err) {
-                    console.error('Error fetching Spotify data:', err);
+
+                    console.error(
+                        'Error fetching Spotify data:',
+                        err
+                    );
 
                     return sendErrorResponse(
                         interaction,
+
                         t.spotifyError.title + '\n\n' +
                         t.spotifyError.message + '\n' +
                         t.spotifyError.note,
+
                         5000
                     );
                 }
@@ -428,19 +557,25 @@ module.exports = {
                 let resolve;
 
                 try {
+
                     resolve = await client.riffy.resolve({
                         query,
                         requester: interaction.user.username
                     });
 
                 } catch (err) {
+
                     const msg = err?.message || '';
 
                     if (
                         msg.includes('fetch failed') ||
                         msg.includes('No nodes are available') ||
-                        (err.cause && err.cause.code === 'ECONNREFUSED')
+                        (
+                            err.cause &&
+                            err.cause.code === 'ECONNREFUSED'
+                        )
                     ) {
+
                         await nodeManager.reconnectNodesNow?.(5000)
                             .catch(() => {});
 
@@ -452,6 +587,7 @@ module.exports = {
                         });
 
                     } else {
+
                         throw err;
                     }
                 }
@@ -461,19 +597,24 @@ module.exports = {
                     typeof resolve !== 'object' ||
                     !Array.isArray(resolve.tracks)
                 ) {
+
                     return sendErrorResponse(
                         interaction,
+
                         t.invalidResponse.title + '\n\n' +
                         t.invalidResponse.message + '\n' +
                         t.invalidResponse.note,
+
                         5000
                     );
                 }
 
                 if (resolve.loadType === 'playlist') {
+
                     isPlaylist = true;
 
                     for (const track of resolve.tracks) {
+
                         track.info.requester =
                             interaction.user.username;
 
@@ -489,14 +630,18 @@ module.exports = {
                     resolve.loadType === 'search' ||
                     resolve.loadType === 'track'
                 ) {
+
                     const track = resolve.tracks.shift();
 
                     if (!track) {
+
                         return sendErrorResponse(
                             interaction,
+
                             t.noResults.title + '\n\n' +
                             t.noResults.message + '\n' +
                             t.noResults.note,
+
                             5000
                         );
                     }
@@ -512,18 +657,21 @@ module.exports = {
                     );
 
                 } else {
+
                     return sendErrorResponse(
                         interaction,
+
                         t.noResults.title + '\n\n' +
                         t.noResults.message + '\n' +
                         t.noResults.note,
+
                         5000
                     );
                 }
             }
 
             // ==========================================
-            // ADD SPOTIFY TRACKS TO QUEUE
+            // ADD SPOTIFY TRACKS
             // ==========================================
 
             let queuedTracks = 0;
@@ -535,9 +683,11 @@ module.exports = {
                 i < Math.min(tracksToQueue.length, maxTracks);
                 i++
             ) {
+
                 const trackQuery = tracksToQueue[i];
 
                 try {
+
                     const resolve = await client.riffy.resolve({
                         query: trackQuery,
                         requester: interaction.user.username
@@ -548,6 +698,7 @@ module.exports = {
                         resolve.tracks &&
                         resolve.tracks.length > 0
                     ) {
+
                         const trackInfo = resolve.tracks[0];
 
                         player.queue.add(trackInfo);
@@ -561,6 +712,7 @@ module.exports = {
                     }
 
                 } catch (error) {
+
                     console.error(
                         `Error resolving track ${trackQuery}:`,
                         error
@@ -569,18 +721,21 @@ module.exports = {
             }
 
             if (tracksToQueue.length > maxTracks) {
+
                 console.warn(
                     `Playlist truncated: ${tracksToQueue.length} tracks requested, only ${maxTracks} queued`
                 );
             }
 
             // ==========================================
-            // WAIT FOR VOICE CONNECTION
+            // WAIT FOR CONNECTION
             // ==========================================
 
-            const connected = await waitForPlayerConnection(player);
+            const connected =
+                await waitForPlayerConnection(player);
 
             if (!connected) {
+
                 throw new Error(
                     'Voice connection was not established. The bot did not join the voice channel.'
                 );
@@ -619,7 +774,7 @@ module.exports = {
             const successContainer = buildPaleCard(
                 `${titleIcon} ${sanitizeTitle(successTitle, 'Play')}`,
                 [
-                    `### ${addedIcon} Added` + '\n' +
+                    `### ${addedIcon} Added\n` +
                     (
                         isPlaylist
                             ? t.success.playlistAdded.replace(
@@ -629,7 +784,7 @@ module.exports = {
                             : t.success.trackAdded
                     ),
 
-                    `### ${statusIcon} Status` + '\n' +
+                    `### ${statusIcon} Status\n` +
                     statusText
                 ]
             );
@@ -645,6 +800,7 @@ module.exports = {
             }, 3000);
 
         } catch (error) {
+
             console.error('[PLAY COMMAND ERROR]', error);
 
             const lang = await getLang(interaction.guildId)
@@ -672,5 +828,5 @@ module.exports = {
         }
     },
 
-    requesters: requesters,
+    requesters: requesters
 };
