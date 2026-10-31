@@ -1,84 +1,117 @@
 
-// Handle autocomplete
-if (interaction.isAutocomplete()) {
-    if (interaction.commandName !== 'play') return;
+const { Events } = require('discord.js');
+const { getLavalinkManager } = require('../../lavalink.js');
 
-    let responded = false;
+function formatDuration(ms) {
+    const seconds = Math.floor((ms / 1000) % 60);
+    const minutes = Math.floor((ms / 60000) % 60);
+    const hours = Math.floor(ms / 3600000);
 
-    const safeRespond = async (choices = []) => {
-        if (responded) return;
-        responded = true;
+    return [
+        hours ? `${hours}h` : null,
+        minutes ? `${minutes}m` : null,
+        `${seconds}s`
+    ].filter(Boolean).join(' ');
+}
+
+module.exports = {
+    name: Events.InteractionCreate,
+
+    async execute(interaction, client) {
+
+        if (!interaction.isAutocomplete()) return;
+
+        if (interaction.commandName !== 'play') {
+            return interaction.respond([]).catch(() => {});
+        }
+
+        let responded = false;
+
+        const safeRespond = async (choices = []) => {
+            if (responded || interaction.responded) return;
+
+            responded = true;
+
+            try {
+                await interaction.respond(
+                    Array.isArray(choices) ? choices.slice(0, 25) : []
+                );
+            } catch (error) {
+                console.error('[AUTOCOMPLETE RESPONSE]', error);
+            }
+        };
+
+        let timeout;
 
         try {
-            if (interaction.responded) return;
-            await interaction.respond(choices.slice(0, 25));
-        } catch (error) {
-            console.error('[PLAY AUTOCOMPLETE] Response error:', error.message);
-        }
-    };
+            const focused = interaction.options.getFocused(true);
 
-    try {
-        const focusedOption = interaction.options.getFocused(true);
-
-        if (focusedOption.name !== 'name') {
-            return safeRespond([]);
-        }
-
-        const query = focusedOption.value?.trim();
-
-        if (!query || query.length < 2) {
-            return safeRespond([]);
-        }
-
-        // Give Discord a response before its 3-second timeout
-        const searchPromise = (async () => {
-            const nodeManager = getLavalinkManager();
-
-            if (!nodeManager) return [];
-
-            await nodeManager.ensureNodeAvailable();
-
-            const resolve = await client.riffy.resolve({
-                query,
-                requester: interaction.user.username
-            });
-
-            if (!resolve || !Array.isArray(resolve.tracks)) {
-                return [];
+            if (focused.name !== 'name') {
+                return await safeRespond([]);
             }
 
-            return resolve.tracks.slice(0, 25).map(track => {
-                const info = track.info || {};
+            const query = String(focused.value || '').trim();
 
-                const duration = formatDuration(info.length || 0);
+            if (query.length < 2) {
+                return await safeRespond([]);
+            }
 
-                const title = `${info.title || 'Unknown'} - ${info.author || 'Unknown'} (${duration})`;
+            const searchPromise = (async () => {
+                const manager = getLavalinkManager();
 
-                // Discord choice name/value limit is 100 characters
-                return {
-                    name: title.substring(0, 100),
-                    value: (info.uri && info.uri.length <= 100)
-                        ? info.uri
-                        : query.substring(0, 100)
-                };
+                if (!manager || !client.riffy) return [];
+
+                await manager.ensureNodeAvailable();
+
+                const result = await client.riffy.resolve({
+                    query,
+                    requester: interaction.user.username
+                });
+
+                if (!result || !Array.isArray(result.tracks)) {
+                    return [];
+                }
+
+                return result.tracks.slice(0, 25).map(track => {
+                    const info = track.info || {};
+
+                    const title =
+                        `${info.title || 'Unknown'} - ${info.author || 'Unknown'} (${formatDuration(info.length || 0)})`;
+
+                    return {
+                        name: title.length > 100
+                            ? title.substring(0, 97) + '...'
+                            : title,
+
+                        value:
+                            typeof info.uri === 'string' &&
+                            info.uri.length > 0 &&
+                            info.uri.length <= 100
+                                ? info.uri
+                                : query.substring(0, 100)
+                    };
+                });
+            })();
+
+            const timeoutPromise = new Promise(resolve => {
+                timeout = setTimeout(() => resolve([]), 1800);
             });
-        })();
 
-        const timeoutPromise = new Promise(resolve => {
-            setTimeout(() => resolve([]), 1800);
-        });
+            const choices = await Promise.race([
+                searchPromise,
+                timeoutPromise
+            ]);
 
-        const choices = await Promise.race([
-            searchPromise,
-            timeoutPromise
-        ]);
+            clearTimeout(timeout);
 
-        await safeRespond(choices);
+            await safeRespond(choices);
 
-    } catch (error) {
-        console.error('[PLAY AUTOCOMPLETE ERROR]', error);
-        await safeRespond([]);
+        } catch (error) {
+            clearTimeout(timeout);
+
+            console.error('[PLAY AUTOCOMPLETE ERROR]', error);
+
+            await safeRespond([]);
+        }
     }
-
-    return;
-}
+};
